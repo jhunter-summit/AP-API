@@ -1,0 +1,449 @@
+openapi: 3.0.3
+
+info:
+  title: Summit / Quadient / Sage 500 AP Integration API
+  version: 1.0.0
+  description: |
+    API for Quadient to retrieve Sage 500 data and send invoice information back to Summit.
+
+    Current GET endpoints:
+    - G/L Accounts
+    - Customers
+    - Purchase Orders
+    - Receipts / Receiving Info
+    - Open AP Invoices
+    - Customer Statements
+
+    Notes:
+    - Date/time values are returned from Sage 500.
+    - Incremental endpoints support updatedSince.
+    - Quadient is responsible for tracking the last successful sync date.
+    - API key authentication is planned but may be disabled during early testing.
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+  - url: https://summit-pcb.com/api/v1
+    description: Production
+
+paths:
+
+  /gl-accounts:
+    get:
+      summary: Get G/L account list
+      responses:
+        '200':
+          description: G/L accounts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GLAccountList'
+
+  /customers:
+    get:
+      summary: Get customer list
+      responses:
+        '200':
+          description: Customers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerList'
+
+  /purchase-orders:
+    get:
+      summary: Get purchase orders
+      parameters:
+        - $ref: '#/components/parameters/UpdatedSince'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Purchase orders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PurchaseOrderList'
+
+  /receipts:
+    get:
+      summary: Get receiving information
+      parameters:
+        - $ref: '#/components/parameters/UpdatedSince'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Receipts / receiving info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReceiptList'
+
+  /invoices:
+    get:
+      summary: Get open AP invoices
+      description: Returns open AP invoices from Sage 500. Open is currently determined by non-zero balance.
+      parameters:
+        - $ref: '#/components/parameters/UpdatedSince'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Open AP invoices
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceList'
+
+  /statements:
+    get:
+      summary: Get customer statement-style open AR data
+      description: Returns open customer invoice/balance data used to generate statement-style information.
+      parameters:
+        - $ref: '#/components/parameters/UpdatedSince'
+        - name: customerId
+          in: query
+          required: false
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Statement data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatementList'
+
+  /invoices/{invoiceNumber}:
+    put:
+      summary: Send invoice information back to Summit
+      description: Receives invoice status or invoice-processing information from Quadient.
+      parameters:
+        - name: invoiceNumber
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvoiceUpdate'
+      responses:
+        '200':
+          description: Invoice update accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+components:
+
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+
+    UpdatedSince:
+      name: updatedSince
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+      description: Return records updated after this date/time.
+
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        default: 1
+
+    PageSize:
+      name: pageSize
+      in: query
+      required: false
+      schema:
+        type: integer
+        default: 100
+        maximum: 500
+
+  responses:
+
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+        pageSize:
+          type: integer
+
+    GLAccountList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/GLAccount'
+
+    GLAccount:
+      type: object
+      properties:
+        accountNumber:
+          type: string
+        description:
+          type: string
+        active:
+          type: integer
+          description: 1 = active, 0 = inactive
+
+    CustomerList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Customer'
+
+    Customer:
+      type: object
+      properties:
+        customerId:
+          type: string
+        customerName:
+          type: string
+        companyId:
+          type: string
+
+    PurchaseOrderList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PurchaseOrder'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    PurchaseOrder:
+      type: object
+      properties:
+        poKey:
+          type: integer
+        poNumber:
+          type: string
+        poDate:
+          type: string
+          format: date-time
+        companyId:
+          type: string
+        vendorId:
+          type: string
+        vendorName:
+          type: string
+        poLineKey:
+          type: integer
+        poLineNumber:
+          type: integer
+        itemKey:
+          type: integer
+        lineDescription:
+          type: string
+        unitCost:
+          type: number
+        lineAmount:
+          type: number
+        quantityOrdered:
+          type: number
+          nullable: true
+
+    ReceiptList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Receipt'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    Receipt:
+      type: object
+      properties:
+        receiptKey:
+          type: integer
+        receiptNumber:
+          type: string
+        receiptDate:
+          type: string
+          format: date-time
+        companyId:
+          type: string
+        vendorId:
+          type: string
+        vendorName:
+          type: string
+        receiptLineKey:
+          type: integer
+        receiptLineNumber:
+          type: integer
+        poLineKey:
+          type: integer
+        unitCost:
+          type: number
+        taxAmount:
+          type: number
+        poNumber:
+          type: string
+        poLineNumber:
+          type: integer
+        itemKey:
+          type: integer
+        lineDescription:
+          type: string
+
+    InvoiceList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Invoice'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    Invoice:
+      type: object
+      properties:
+        voucherKey:
+          type: integer
+        companyId:
+          type: string
+        invoiceNumber:
+          type: string
+        invoiceDate:
+          type: string
+          format: date-time
+        postDate:
+          type: string
+          format: date-time
+        invoiceReceiptDate:
+          type: string
+          format: date-time
+          nullable: true
+        dueDate:
+          type: string
+          format: date-time
+        invoiceAmount:
+          type: number
+        purchaseAmount:
+          type: number
+        balance:
+          type: number
+        statusCode:
+          type: integer
+        status:
+          type: string
+        invoiceDescription:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        vendorId:
+          type: string
+        vendorName:
+          type: string
+
+    StatementList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Statement'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    Statement:
+      type: object
+      properties:
+        customerKey:
+          type: integer
+        customerId:
+          type: string
+        customerName:
+          type: string
+        invoiceKey:
+          type: integer
+        invoiceNumber:
+          type: string
+        invoiceDate:
+          type: string
+          format: date-time
+        dueDate:
+          type: string
+          format: date-time
+        invoiceAmount:
+          type: number
+        balance:
+          type: number
+        statusCode:
+          type: integer
+        updatedAt:
+          type: string
+          format: date-time
+
+    InvoiceUpdate:
+      type: object
+      properties:
+        invoiceNumber:
+          type: string
+        quadientInvoiceId:
+          type: string
+        status:
+          type: string
+        notes:
+          type: string
+        rawPayload:
+          type: object
+
+    UpdateResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        referenceId:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string

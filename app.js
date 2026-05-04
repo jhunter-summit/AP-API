@@ -323,6 +323,66 @@ app.get('/customers', async (req, res) => {
   }
 });
 
+app.get('/statements', async (req, res) => {
+  try {
+    const { updatedSince = null, customerId = null } = req.query;
+    const { page, pageSize, offset } = getPaging(req.query);
+
+    const request = pool.request()
+      .input('updatedSince', updatedSince)
+      .input('customerId', customerId);
+
+    const result = await request.query(`
+      SELECT
+        c.CustKey AS customerKey,
+        c.CustID AS customerId,
+        c.CustName AS customerName,
+
+        inv.InvcKey AS invoiceKey,
+        inv.TranID AS invoiceNumber,
+        inv.TranDate AS invoiceDate,
+        inv.DueDate AS dueDate,
+        inv.TranAmt AS invoiceAmount,
+        inv.Balance AS balance,
+        inv.Status AS statusCode,
+        inv.UpdateDate AS updatedAt
+
+      FROM dbo.tarInvoice inv
+      INNER JOIN dbo.tarCustomer c
+        ON inv.CustKey = c.CustKey
+
+      WHERE
+        inv.Balance <> 0
+        AND (@updatedSince IS NULL OR inv.UpdateDate >= @updatedSince)
+        AND (@customerId IS NULL OR c.CustID = @customerId)
+
+      ORDER BY c.CustID, inv.TranDate DESC
+
+      OFFSET ${offset} ROWS
+      FETCH NEXT ${pageSize} ROWS ONLY;
+    `);
+
+    res.json({
+      data: result.recordset,
+      pagination: { page, pageSize }
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: 'QUERY_FAILED',
+      message: err.message
+    });
+  }
+});
+
+const swaggerUi = require('swagger-ui-express');
+const YAML = require('yamljs');
+
+const swaggerDocument = YAML.load('./swagger/openapi.yaml');
+
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+
 function getPaging(query) {
   const page = Math.max(parseInt(query.page, 10) || 1, 1);
   const pageSize = Math.min(Math.max(parseInt(query.pageSize, 10) || 100, 1), 500);
