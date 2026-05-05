@@ -36,6 +36,47 @@ app.get('/health', (req, res) => {
     res.json({ status: 'OK' });
 });
 
+const swaggerUi = require('swagger-ui-express');
+const YAML = require('yamljs');
+
+const swaggerDocument = YAML.load('./swagger/openapi.yaml');
+
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+
+function apiKeyAuth(req, res, next) {
+  console.log('--- API KEY AUTH START ---');
+  console.log('REQUIRE_API_KEY:', process.env.REQUIRE_API_KEY);
+
+  if (process.env.REQUIRE_API_KEY !== 'true') {
+    console.log('API key not required. Continuing.');
+    return next();
+  }
+
+    const providedKey = String(
+    req.get('x-api-key') ||
+    req.header('x-api-key') ||
+    req.query.apiKey ||
+    req.query.api_key ||
+    ''
+    ).trim();
+
+//   console.log('Provided key exists:', !!providedKey);
+//   console.log('Expected key exists:', !!process.env.API_KEY);
+//   console.log('Keys match:', providedKey === process.env.API_KEY);
+
+  if (!providedKey || providedKey !== process.env.API_KEY) {
+    console.log('AUTH FAILED - returning 401 from apiKeyAuth');
+    return res.status(401).json({
+      error: 'Unauthorized',
+      message: 'Missing or invalid API key'
+    });
+  }
+
+  //console.log('AUTH PASSED - calling next()');
+  return next();
+}
+app.use(apiKeyAuth);
+
 app.get('/db-test', async (req, res) => {
     try {
         const result = await pool.request().query(`
@@ -128,7 +169,7 @@ app.get('/invoices', async (req, res) => {
             WHEN 1 THEN 'Open'
             WHEN 2 THEN 'Closed'
             ELSE 'Unknown'
-        END AS status
+        END AS status,
         inv.TranCmnt AS invoiceDescription,
         inv.CreateDate AS createdAt,
         inv.UpdateDate AS updatedAt,
@@ -188,47 +229,90 @@ app.get('/purchase-orders', async (req, res) => {
     const request = pool.request()
       .input('updatedSince', updatedSince);
 
-    const result = await request.query(`
+    const headerRequest = pool.request()
+      .input('updatedSince', updatedSince)
+      .input('offset', offset)
+      .input('pageSize', pageSize);
+
+    const headerResult = await headerRequest.query(`
       SELECT
-        po.POKey AS poKey,
-        po.TranID AS poNumber,
-        po.TranDate AS poDate,
-        po.CompanyID AS companyId,
-        v.VendID AS vendorId,
-        v.VendName AS vendorName,
-
-        pol.POLineKey AS poLineKey,
-        pol.POLineNo AS poLineNumber,
-        pol.ItemKey AS itemKey,
-        pol.Description AS lineDescription,
-        pol.UnitCost AS unitCost,
-        pol.ExtAmt AS lineAmount,
-
-        CASE
-          WHEN pol.UnitCost <> 0 THEN pol.ExtAmt / pol.UnitCost
-          ELSE NULL
-        END AS quantityOrdered
-
+          po.POKey AS poKey,
+          po.TranID AS poNumber,
+          po.TranDate AS poDate,
+          po.CompanyID AS companyId,
+          v.VendID AS vendorId,
+          v.VendName AS vendorName
       FROM dbo.tpoPurchOrder po
       INNER JOIN dbo.tapVendor v
-        ON po.VendKey = v.VendKey
-      LEFT JOIN dbo.tpoPOLine pol
-        ON po.POKey = pol.POKey
-
+          ON po.VendKey = v.VendKey
       WHERE
-        (@updatedSince IS NULL OR po.TranDate >= @updatedSince)
-
-      ORDER BY po.TranDate DESC, po.TranID, pol.POLineNo
-
-      OFFSET ${offset} ROWS
-      FETCH NEXT ${pageSize} ROWS ONLY;
+          (@updatedSince IS NULL OR po.TranDate >= @updatedSince)
+      ORDER BY po.TranDate DESC, po.TranID, po.POKey
+      OFFSET @offset ROWS
+      FETCH NEXT @pageSize ROWS ONLY;
     `);
 
-    res.json({
-      data: result.recordset,
-      pagination: { page, pageSize }
+    const purchaseOrders = headerResult.recordset;
+
+    if (purchaseOrders.length === 0) {
+      return res.json({
+        page,
+        pageSize,
+        count: 0,
+        data: []
+      });
+    }
+
+    const poKeys = purchaseOrders.map(po => po.poKey);
+
+    const lineRequest = pool.request();
+
+    const poKeyParams = poKeys.map((poKey, index) => {
+      const paramName = `poKey${index}`;
+      lineRequest.input(paramName, poKey);
+      return `@${paramName}`;
     });
 
+    const lineResult = await lineRequest.query(`
+      SELECT
+          pol.POKey AS poKey,
+          pol.POLineKey AS poLineKey,
+          pol.POLineNo AS poLineNumber,
+          pol.ItemKey AS itemKey,
+          pol.Description AS lineDescription,
+          pol.UnitCost AS unitCost,
+          pol.ExtAmt AS lineAmount,
+          CASE
+              WHEN pol.UnitCost <> 0 THEN pol.ExtAmt / pol.UnitCost
+              ELSE NULL
+          END AS quantityOrdered
+      FROM dbo.tpoPOLine pol
+      WHERE pol.POKey IN (${poKeyParams.join(', ')})
+      ORDER BY pol.POKey, pol.POLineNo;
+    `);
+
+    const linesByPoKey = new Map();
+
+    for (const line of lineResult.recordset) {
+      if (!linesByPoKey.has(line.poKey)) {
+        linesByPoKey.set(line.poKey, []);
+      }
+
+      const { poKey, ...lineData } = line;
+      linesByPoKey.get(poKey).push(lineData);
+    }
+
+    const data = purchaseOrders.map(po => ({
+      ...po,
+      lines: linesByPoKey.get(po.poKey) || []
+    }));
+
+    return res.json({
+      page,
+      pageSize,
+      count: data.length,
+      data
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({
@@ -376,12 +460,7 @@ app.get('/statements', async (req, res) => {
   }
 });
 
-const swaggerUi = require('swagger-ui-express');
-const YAML = require('yamljs');
 
-const swaggerDocument = YAML.load('./swagger/openapi.yaml');
-
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 function getPaging(query) {
   const page = Math.max(parseInt(query.page, 10) || 1, 1);
