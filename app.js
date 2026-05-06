@@ -1,3 +1,5 @@
+// main file for Express server and API endpoints
+
 require('dotenv').config();
 
 const express = require('express');
