@@ -6,6 +6,7 @@ const express = require('express');
 const sql = require('mssql');
 
 const app = express();
+app.use(express.json({ limit: '2mb' }));
 const port = process.env.PORT || 3000;
 
 const config = {
@@ -28,6 +29,74 @@ console.log({
   port: config.port,
   passwordLength: config.password?.length
 });
+
+function validateQuadientInvoice(payload) {
+  const errors = [];
+
+  if (!payload || typeof payload !== 'object') {
+    return ['Payload must be a JSON object'];
+  }
+
+  if (!payload.invoiceNumber) {
+    errors.push('invoiceNumber is required');
+  }
+
+  if (payload.vendorKey == null && !payload.vendorId) {
+    errors.push('Either vendorKey or vendorId is required');
+  }
+
+  if (!payload.invoiceDate) {
+    errors.push('invoiceDate is required');
+  }
+
+  if (!payload.dueDate) {
+    errors.push('dueDate is required');
+  }
+
+  if (payload.totalAmount == null) {
+    errors.push('totalAmount is required');
+  }
+
+  if (!Array.isArray(payload.lines) || payload.lines.length === 0) {
+    errors.push('lines must be a non-empty array');
+  }
+
+  if (Array.isArray(payload.lines)) {
+    payload.lines.forEach((line, index) => {
+      if (line.lineAmount == null) {
+        errors.push(`lines[${index}].lineAmount is required`);
+      }
+
+      if (line.quantity == null) {
+        errors.push(`lines[${index}].quantity is required`);
+      }
+
+      if (line.unitCost == null) {
+        errors.push(`lines[${index}].unitCost is required`);
+      }
+
+      if (line.rcvrLineKey == null) {
+        errors.push(`lines[${index}].rcvrLineKey is required`);
+      }
+
+      if (line.poLineKey == null) {
+        errors.push(`lines[${index}].poLineKey is required`);
+      }
+    });
+  }
+
+  const lineTotal = Array.isArray(payload.lines)
+    ? payload.lines.reduce((sum, line) => sum + Number(line.lineAmount || 0), 0)
+    : 0;
+
+  const totalAmount = Number(payload.totalAmount || 0);
+
+  if (Array.isArray(payload.lines) && Math.abs(lineTotal - totalAmount) > 0.01) {
+    errors.push(`Line total ${lineTotal.toFixed(2)} does not match totalAmount ${totalAmount.toFixed(2)}`);
+  }
+
+  return errors;
+}
 
 async function initDb() {
     pool = await sql.connect(config);
@@ -123,6 +192,7 @@ app.get('/vendors', async (req, res) => {
     const result = await pool.request().query(`
       SELECT TOP 50
         VendID AS vendorId,
+        VendKey AS vendorKey,
         VendName AS vendorName
       FROM dbo.tapVendor
       ORDER BY VendName
@@ -239,6 +309,7 @@ app.get('/purchase-orders', async (req, res) => {
     const headerResult = await headerRequest.query(`
       SELECT
           po.POKey AS poKey,
+          po.VendKey AS vendKey,
           po.TranID AS poNumber,
           po.TranDate AS poDate,
           po.CompanyID AS companyId,
@@ -462,7 +533,165 @@ app.get('/statements', async (req, res) => {
   }
 });
 
+app.post('/quadient/invoices', async (req, res) => {
+  const payload = req.body;
 
+  try {
+    const validationErrors = validateQuadientInvoice(payload);
+
+    if (validationErrors.length > 0) {
+      return res.status(400).json({
+        error: 'VALIDATION_FAILED',
+        message: 'Invoice payload failed validation',
+        details: validationErrors
+      });
+    }
+
+    const transaction = new sql.Transaction(pool);
+
+    await transaction.begin();
+
+    try {
+      const headerRequest = new sql.Request(transaction);
+
+      const headerResult = await headerRequest
+        .input('invoiceNumber', sql.NVarChar(50), payload.invoiceNumber)
+        .input('vendKey', sql.Int, payload.vendorKey ?? null)
+        .input('vendorId', sql.NVarChar(50), payload.vendorId || null)
+        .input('companyId', sql.NVarChar(20), payload.companyId || null)
+        .input('invoiceDate', sql.Date, payload.invoiceDate)
+        .input('dueDate', sql.Date, payload.dueDate)
+        .input('memo', sql.NVarChar(sql.MAX), payload.memo || null)
+        .input('beanworksInvoiceUrl', sql.NVarChar(500), payload.beanworksInvoiceUrl || null)
+        .input('currency', sql.NVarChar(10), payload.currency || null)
+        .input('totalAmount', sql.Decimal(19, 4), payload.totalAmount)
+        .input('rawPayload', sql.NVarChar(sql.MAX), JSON.stringify(payload))
+        .query(`
+          INSERT INTO dbo.QuadientInvoiceStaging (
+              InvoiceNumber,
+              VendKey,
+              VendorID,
+              CompanyID,
+              InvoiceDate,
+              DueDate,
+              Memo,
+              BeanworksInvoiceURL,
+              Currency,
+              TotalAmount,
+              RawPayload,
+              ProcessingStatus
+          )
+          OUTPUT INSERTED.QuadientInvoiceStagingID AS stagingId
+          VALUES (
+              @invoiceNumber,
+              @vendKey,
+              @vendorId,
+              @companyId,
+              @invoiceDate,
+              @dueDate,
+              @memo,
+              @beanworksInvoiceUrl,
+              @currency,
+              @totalAmount,
+              @rawPayload,
+              'ReadyForDIM'
+          );
+        `);
+
+      const stagingId = headerResult.recordset[0].stagingId;
+
+      for (const line of payload.lines) {
+        const lineRequest = new sql.Request(transaction);
+
+        await lineRequest
+          .input('stagingId', sql.Int, stagingId)
+          .input('lineNumber', sql.Int, line.lineNumber ?? null)
+          .input('itemKey', sql.Int, line.itemKey ?? null)
+          .input('itemId', sql.NVarChar(100), line.itemId || null)
+          .input('unitCost', sql.Decimal(19, 4), line.unitCost)
+          .input('quantity', sql.Decimal(19, 4), line.quantity)
+          .input('unitMeasure', sql.NVarChar(20), line.unitMeasure || null)
+          .input('unitMeasKey', sql.Int, line.unitMeasKey ?? null)
+          .input('lineAmount', sql.Decimal(19, 4), line.lineAmount)
+          .input('poKey', sql.Int, line.poKey ?? null)
+          .input('poNumber', sql.NVarChar(50), line.poNumber || null)
+          .input('poLineKey', sql.Int, line.poLineKey)
+          .input('poLineNumber', sql.Int, line.poLineNumber ?? null)
+          .input('rcvrLineKey', sql.Int, line.rcvrLineKey)
+          .input('description', sql.NVarChar(sql.MAX), line.description || null)
+          .input('sTaxClassKey', sql.Int, line.sTaxClassKey ?? null)
+          .input('department', sql.NVarChar(50), line.department || null)
+          .input('costCenter', sql.NVarChar(50), line.costCenter || null)
+          .query(`
+            INSERT INTO dbo.QuadientInvoiceLineStaging (
+                QuadientInvoiceStagingID,
+                LineNumber,
+                ItemKey,
+                ItemID,
+                UnitCost,
+                Quantity,
+                UnitMeasure,
+                UnitMeasKey,
+                LineAmount,
+                POKey,
+                PONumber,
+                POLineKey,
+                POLineNumber,
+                RcvrLineKey,
+                Description,
+                STaxClassKey,
+                Department,
+                CostCenter
+            )
+            VALUES (
+                @stagingId,
+                @lineNumber,
+                @itemKey,
+                @itemId,
+                @unitCost,
+                @quantity,
+                @unitMeasure,
+                @unitMeasKey,
+                @lineAmount,
+                @poKey,
+                @poNumber,
+                @poLineKey,
+                @poLineNumber,
+                @rcvrLineKey,
+                @description,
+                @sTaxClassKey,
+                @department,
+                @costCenter
+            );
+          `);
+      }
+
+      await transaction.commit();
+
+      return res.status(201).json({
+        status: 'received',
+        processingStatus: 'ReadyForDIM',
+        stagingId,
+        invoiceNumber: payload.invoiceNumber,
+        vendorKey: payload.vendorKey ?? null,
+        vendorId: payload.vendorId || null,
+        lineCount: payload.lines.length
+      });
+
+    } catch (err) {
+      await transaction.rollback();
+      throw err;
+    }
+
+  } catch (err) {
+    console.error('Quadient invoice receive failed:', err);
+
+    return res.status(500).json({
+      error: 'INVOICE_RECEIVE_FAILED',
+      message: err.message
+    });
+  }
+});
 
 function getPaging(query) {
   const page = Math.max(parseInt(query.page, 10) || 1, 1);

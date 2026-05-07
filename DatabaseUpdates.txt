@@ -1,0 +1,61 @@
+create the following tables on the live server before going live
+
+CREATE TABLE dbo.QuadientInvoiceStaging (
+    QuadientInvoiceStagingID INT IDENTITY(1,1) PRIMARY KEY,
+
+    InvoiceNumber NVARCHAR(50) NOT NULL,
+    VendKey INT NOT NULL,
+    VendorID NVARCHAR(50) NULL,
+
+    CompanyID NVARCHAR(20) NULL,
+    InvoiceDate DATE NOT NULL,
+    DueDate DATE NOT NULL,
+    Memo NVARCHAR(MAX) NULL,
+    BeanworksInvoiceURL NVARCHAR(500) NULL,
+    Currency NVARCHAR(10) NULL,
+    TotalAmount DECIMAL(19,4) NOT NULL,
+
+    RawPayload NVARCHAR(MAX) NOT NULL,
+
+    ProcessingStatus NVARCHAR(30) NOT NULL DEFAULT 'Received',
+    ProcessingMessage NVARCHAR(MAX) NULL,
+
+    SageVoucherKey INT NULL,
+
+    CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+    ProcessedAt DATETIME2 NULL
+);
+
+CREATE TABLE dbo.QuadientInvoiceLineStaging (
+    QuadientInvoiceLineStagingID INT IDENTITY(1,1) PRIMARY KEY,
+    QuadientInvoiceStagingID INT NOT NULL,
+
+    LineNumber INT NULL,
+
+    ItemKey INT NULL,
+    ItemID NVARCHAR(100) NULL,
+
+    UnitCost DECIMAL(19,4) NULL,
+    Quantity DECIMAL(19,4) NULL,
+    UnitMeasure NVARCHAR(20) NULL,
+    LineAmount DECIMAL(19,4) NOT NULL,
+
+    POKey INT NULL,
+    PONumber NVARCHAR(50) NULL,
+    POLineKey INT NOT NULL,
+    POLineNumber INT NULL,
+
+    RcvrLineKey INT NOT NULL,
+
+    Description NVARCHAR(MAX) NULL,
+    STaxClassKey INT NULL,
+
+    Department NVARCHAR(50) NULL,
+    CostCenter NVARCHAR(50) NULL,
+
+    CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT FK_QuadientInvoiceLineStaging_Invoice
+        FOREIGN KEY (QuadientInvoiceStagingID)
+        REFERENCES dbo.QuadientInvoiceStaging(QuadientInvoiceStagingID)
+);

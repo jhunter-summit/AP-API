@@ -2,35 +2,107 @@ openapi: 3.0.3
 
 info:
   title: Summit / Quadient / Sage 500 AP Integration API
-  version: 1.0.0
+  version: 1.1.0
   description: |
-    API for Quadient to retrieve Sage 500 data and send invoice information back to Summit.
+    API for Quadient Beanworks to retrieve Sage 500 data and send invoice information back to Summit.
 
-    Current GET endpoints:
+    Current outbound GET endpoints:
+    - Health / diagnostics
+    - Companies
     - G/L Accounts
     - Customers
+    - Vendors
     - Purchase Orders
     - Receipts / Receiving Info
     - Open AP Invoices
     - Customer Statements
 
+    Current inbound POST endpoints:
+    - Quadient invoice staging for Sage 500 Data Import Manager processing
+
     Notes:
     - Date/time values are returned from Sage 500.
-    - Incremental endpoints support updatedSince.
+    - Incremental endpoints support updatedSince where applicable.
     - Quadient is responsible for tracking the last successful sync date.
-    - API key authentication is planned but may be disabled during early testing.
+    - API key authentication uses the x-api-key request header.
+    - The inbound invoice endpoint stores invoice data in staging tables only. It does not write directly to Sage 500 voucher tables.
 
 servers:
   - url: http://localhost:3000
-    description: Local development
-  - url: https://summit-pcb.com/api/v1
-    description: Production
+    description: Local testing endpoint
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: Diagnostics
+  - name: Reference
+  - name: GL Accounts
+  - name: Customers
+  - name: Vendors
+  - name: Purchase Orders
+  - name: Receipts
+  - name: AP Invoices
+  - name: AR Statements
+  - name: Quadient Inbound
 
 paths:
+
+  /health:
+    get:
+      summary: Health check
+      description: Returns basic API health information. This endpoint may be left unauthenticated depending on deployment configuration.
+      tags:
+        - Diagnostics
+      responses:
+        '200':
+          description: API is running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /db-test:
+    get:
+      summary: Test database connectivity
+      description: Tests whether the API can connect to the Sage 500 SQL Server database.
+      tags:
+        - Diagnostics
+      responses:
+        '200':
+          description: Database connection successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DbTestResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /companies:
+    get:
+      summary: Get companies
+      description: Returns companies available from Sage 500.
+      tags:
+        - Reference
+      responses:
+        '200':
+          description: Companies
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompanyList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
 
   /gl-accounts:
     get:
       summary: Get G/L account list
+      tags:
+        - GL Accounts
       responses:
         '200':
           description: G/L accounts
@@ -38,10 +110,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GLAccountList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
 
   /customers:
     get:
       summary: Get customer list
+      tags:
+        - Customers
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
           description: Customers
@@ -49,10 +130,39 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CustomerList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /vendors:
+    get:
+      summary: Get vendor list
+      description: Returns vendors from Sage 500. VendKey should be used for Sage/DIM writeback matching when available.
+      tags:
+        - Vendors
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/UpdatedSince'
+      responses:
+        '200':
+          description: Vendors
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VendorList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
 
   /purchase-orders:
     get:
       summary: Get purchase orders
+      description: Returns purchase orders grouped by header, with line items nested under each purchase order.
+      tags:
+        - Purchase Orders
       parameters:
         - $ref: '#/components/parameters/UpdatedSince'
         - $ref: '#/components/parameters/Page'
@@ -64,10 +174,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PurchaseOrderList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
 
   /receipts:
     get:
       summary: Get receiving information
+      description: Returns receipt / receiving information from Sage 500.
+      tags:
+        - Receipts
       parameters:
         - $ref: '#/components/parameters/UpdatedSince'
         - $ref: '#/components/parameters/Page'
@@ -79,11 +196,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReceiptList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
 
   /invoices:
     get:
       summary: Get open AP invoices
       description: Returns open AP invoices from Sage 500. Open is currently determined by non-zero balance.
+      tags:
+        - AP Invoices
       parameters:
         - $ref: '#/components/parameters/UpdatedSince'
         - $ref: '#/components/parameters/Page'
@@ -95,11 +218,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InvoiceList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
 
   /statements:
     get:
       summary: Get customer statement-style open AR data
       description: Returns open customer invoice/balance data used to generate statement-style information.
+      tags:
+        - AR Statements
       parameters:
         - $ref: '#/components/parameters/UpdatedSince'
         - name: customerId
@@ -116,40 +245,101 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StatementList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
 
-  /invoices/{invoiceNumber}:
-    put:
-      summary: Send invoice information back to Summit
-      description: Receives invoice status or invoice-processing information from Quadient.
-      parameters:
-        - name: invoiceNumber
-          in: path
-          required: true
-          schema:
-            type: string
+  /quadient/invoices:
+    post:
+      summary: Receive invoice from Quadient Beanworks
+      description: |
+        Receives one 3-way matched invoice per request from Quadient Beanworks and stores it in staging tables for Sage 500 Data Import Manager processing.
+
+        This endpoint does not write directly to Sage 500 voucher tables. After staging, Net@Work / Sage DIM can import from the DIM-facing views and then update the staging status.
+      tags:
+        - Quadient Inbound
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/InvoiceUpdate'
+              $ref: '#/components/schemas/QuadientInvoiceRequest'
+            example:
+              invoiceNumber: TEST-BEAN-1001
+              vendorKey: 123
+              vendorId: TESTVENDOR
+              invoiceDate: '2026-05-07'
+              dueDate: '2026-06-06'
+              memo: Test invoice from Quadient API endpoint
+              beanworksInvoiceUrl: https://example.com/beanworks/invoice/TEST-BEAN-1001
+              currency: USD
+              companyId: '001'
+              totalAmount: 125.00
+              lines:
+                - lineNumber: 1
+                  itemKey: 456
+                  itemId: TESTITEM
+                  unitCost: 12.50
+                  quantity: 10
+                  unitMeasure: EA
+                  unitMeasKey: 1
+                  lineAmount: 125.00
+                  poKey: 10001
+                  poNumber: PO-TEST-001
+                  poLineKey: 20001
+                  poLineNumber: 1
+                  rcvrLineKey: 30001
+                  description: Test invoice line
+                  sTaxClassKey: null
+                  department: TEST
+                  costCenter: TEST
       responses:
-        '200':
-          description: Invoice update accepted
+        '201':
+          description: Invoice received and staged for DIM import
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/UpdateResponse'
+                $ref: '#/components/schemas/QuadientInvoiceResponse'
+              example:
+                status: received
+                processingStatus: ReadyForDIM
+                stagingId: 101
+                invoiceNumber: TEST-BEAN-1001
+                vendorKey: 123
+                vendorId: TESTVENDOR
+                lineCount: 1
         '400':
-          $ref: '#/components/responses/BadRequest'
+          description: Payload validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              example:
+                error: VALIDATION_FAILED
+                message: Invoice payload failed validation
+                details:
+                  - invoiceNumber is required
+                  - lines[0].rcvrLineKey is required
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          description: Invoice staging failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: INVOICE_RECEIVE_FAILED
+                message: SQL insert failed
 
 components:
 
   securitySchemes:
-    apiKeyAuth:
+    ApiKeyAuth:
       type: apiKey
       in: header
-      name: X-API-Key
+      name: x-api-key
 
   parameters:
 
@@ -160,7 +350,8 @@ components:
       schema:
         type: string
         format: date-time
-      description: Return records updated after this date/time.
+      description: Return records updated on or after this date/time where supported.
+      example: '2026-05-01T00:00:00Z'
 
     Page:
       name: page
@@ -168,7 +359,9 @@ components:
       required: false
       schema:
         type: integer
+        minimum: 1
         default: 1
+      description: Page number, starting at 1.
 
     PageSize:
       name: pageSize
@@ -176,8 +369,10 @@ components:
       required: false
       schema:
         type: integer
-        default: 100
+        minimum: 1
         maximum: 500
+        default: 100
+      description: Number of records per page.
 
   responses:
 
@@ -188,165 +383,349 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
 
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Unauthorized
+            message: Missing or invalid API key
+
+    ServerError:
+      description: Server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: QUERY_FAILED
+            message: Database query failed
+
   schemas:
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        message:
+          type: string
+          example: API is running
+
+    DbTestResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        message:
+          type: string
+          example: Database connection successful
 
     Pagination:
       type: object
       properties:
         page:
           type: integer
+          example: 1
         pageSize:
           type: integer
+          example: 100
 
-    GLAccountList:
+    PagedResponseBase:
       type: object
       properties:
-        data:
-          type: array
-          items:
-            $ref: '#/components/schemas/GLAccount'
+        page:
+          type: integer
+          example: 1
+        pageSize:
+          type: integer
+          example: 100
+        count:
+          type: integer
+          example: 1
+
+    CompanyList:
+      allOf:
+        - $ref: '#/components/schemas/PagedResponseBase'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Company'
+
+    Company:
+      type: object
+      properties:
+        companyId:
+          type: string
+          example: '001'
+        companyName:
+          type: string
+          example: Summit Interconnect
+
+    GLAccountList:
+      allOf:
+        - $ref: '#/components/schemas/PagedResponseBase'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/GLAccount'
 
     GLAccount:
       type: object
       properties:
         accountNumber:
           type: string
+          example: '4000-000'
         description:
           type: string
+          example: Sales Revenue
         active:
           type: integer
           description: 1 = active, 0 = inactive
+          example: 1
 
     CustomerList:
-      type: object
-      properties:
-        data:
-          type: array
-          items:
-            $ref: '#/components/schemas/Customer'
+      allOf:
+        - $ref: '#/components/schemas/PagedResponseBase'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Customer'
 
     Customer:
       type: object
       properties:
         customerId:
           type: string
+          example: CUST001
         customerName:
           type: string
+          example: ABC Customer
         companyId:
           type: string
+          example: '001'
 
-    PurchaseOrderList:
+    VendorList:
+      allOf:
+        - $ref: '#/components/schemas/PagedResponseBase'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Vendor'
+
+    Vendor:
       type: object
       properties:
-        data:
-          type: array
-          items:
-            $ref: '#/components/schemas/PurchaseOrder'
-        pagination:
-          $ref: '#/components/schemas/Pagination'
+        vendKey:
+          type: integer
+          nullable: true
+          description: Sage 500 tapVendor.VendKey. Preferred identifier for Sage/DIM processing when available.
+          example: 12345
+        vendorId:
+          type: string
+          example: INSUL
+        vendorName:
+          type: string
+          example: Insulectro (EFT)
+        companyId:
+          type: string
+          nullable: true
+          example: '001'
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    PurchaseOrderList:
+      allOf:
+        - $ref: '#/components/schemas/PagedResponseBase'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/PurchaseOrder'
 
     PurchaseOrder:
       type: object
       properties:
         poKey:
           type: integer
+          example: 10001
         poNumber:
           type: string
+          example: '00007195'
         poDate:
           type: string
           format: date-time
         companyId:
           type: string
+          example: '001'
+        vendKey:
+          type: integer
+          nullable: true
+          example: 12345
         vendorId:
           type: string
+          example: INSUL
         vendorName:
           type: string
+          example: Insulectro (EFT)
+        poTotal:
+          type: number
+          nullable: true
+          example: 9572.00
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/PurchaseOrderLine'
+
+    PurchaseOrderLine:
+      type: object
+      properties:
         poLineKey:
           type: integer
+          example: 20001
         poLineNumber:
           type: integer
+          example: 1
         itemKey:
           type: integer
+          nullable: true
+          example: 456
+        itemId:
+          type: string
+          nullable: true
+          example: TESTITEM
         lineDescription:
           type: string
+          example: Purchase order line description
         unitCost:
           type: number
+          example: 12.50
         lineAmount:
           type: number
+          example: 125.00
         quantityOrdered:
           type: number
           nullable: true
+          example: 10
 
     ReceiptList:
-      type: object
-      properties:
-        data:
-          type: array
-          items:
-            $ref: '#/components/schemas/Receipt'
-        pagination:
-          $ref: '#/components/schemas/Pagination'
+      allOf:
+        - $ref: '#/components/schemas/PagedResponseBase'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Receipt'
 
     Receipt:
       type: object
       properties:
         receiptKey:
           type: integer
+          example: 30000
         receiptNumber:
           type: string
+          example: '000034300'
         receiptDate:
           type: string
           format: date-time
         companyId:
           type: string
+          example: '001'
+        vendKey:
+          type: integer
+          nullable: true
+          example: 12345
         vendorId:
           type: string
+          example: INSUL
         vendorName:
           type: string
+          example: Insulectro (EFT)
         receiptLineKey:
           type: integer
+          description: Receipt line key. May correspond to Sage 500 tpoRcvrLine.RcvrLineKey depending on endpoint implementation.
+          example: 30001
+        rcvrLineKey:
+          type: integer
+          description: Sage 500 tpoRcvrLine.RcvrLineKey. Critical 3-way match identifier.
+          nullable: true
+          example: 30001
         receiptLineNumber:
           type: integer
-        poLineKey:
+          example: 1
+        poKey:
           type: integer
-        unitCost:
-          type: number
-        taxAmount:
-          type: number
+          nullable: true
+          example: 10001
         poNumber:
           type: string
+          example: '00007195'
+        poLineKey:
+          type: integer
+          example: 20001
         poLineNumber:
           type: integer
+          example: 1
         itemKey:
           type: integer
+          nullable: true
+          example: 456
         lineDescription:
           type: string
+        unitCost:
+          type: number
+          example: 12.50
+        taxAmount:
+          type: number
+          nullable: true
+          example: 0
 
     InvoiceList:
-      type: object
-      properties:
-        data:
-          type: array
-          items:
-            $ref: '#/components/schemas/Invoice'
-        pagination:
-          $ref: '#/components/schemas/Pagination'
+      allOf:
+        - $ref: '#/components/schemas/PagedResponseBase'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Invoice'
 
     Invoice:
       type: object
       properties:
         voucherKey:
           type: integer
+          example: 216838
         companyId:
           type: string
+          example: '001'
         invoiceNumber:
           type: string
+          example: INV-12345
         invoiceDate:
           type: string
           format: date-time
         postDate:
           type: string
           format: date-time
+          nullable: true
         invoiceReceiptDate:
           type: string
           format: date-time
@@ -356,36 +735,50 @@ components:
           format: date-time
         invoiceAmount:
           type: number
+          example: 125.00
         purchaseAmount:
           type: number
+          nullable: true
+          example: 125.00
         balance:
           type: number
+          example: 125.00
         statusCode:
           type: integer
         status:
           type: string
+          example: Open
         invoiceDescription:
           type: string
+          nullable: true
         createdAt:
           type: string
           format: date-time
+          nullable: true
         updatedAt:
           type: string
           format: date-time
+          nullable: true
+        vendKey:
+          type: integer
+          nullable: true
+          example: 12345
         vendorId:
           type: string
+          example: INSUL
         vendorName:
           type: string
+          example: Insulectro (EFT)
 
     StatementList:
-      type: object
-      properties:
-        data:
-          type: array
-          items:
-            $ref: '#/components/schemas/Statement'
-        pagination:
-          $ref: '#/components/schemas/Pagination'
+      allOf:
+        - $ref: '#/components/schemas/PagedResponseBase'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Statement'
 
     Statement:
       type: object
@@ -415,35 +808,202 @@ components:
         updatedAt:
           type: string
           format: date-time
+          nullable: true
 
-    InvoiceUpdate:
+    QuadientInvoiceRequest:
       type: object
+      required:
+        - invoiceNumber
+        - invoiceDate
+        - dueDate
+        - totalAmount
+        - lines
       properties:
         invoiceNumber:
           type: string
-        quadientInvoiceId:
+          maxLength: 50
+          example: INV-12345
+        vendorKey:
+          type: integer
+          nullable: true
+          description: Sage 500 tapVendor.VendKey. Preferred vendor identifier for Sage/DIM processing.
+          example: 123
+        vendorId:
           type: string
-        status:
+          nullable: true
+          maxLength: 50
+          description: Human-readable Sage vendor ID. Useful for audit/debugging.
+          example: INSUL
+        invoiceDate:
           type: string
-        notes:
+          format: date
+          example: '2026-05-07'
+        dueDate:
           type: string
-        rawPayload:
-          type: object
+          format: date
+          example: '2026-06-06'
+        memo:
+          type: string
+          nullable: true
+          example: 3-way matched invoice from Beanworks
+        beanworksInvoiceUrl:
+          type: string
+          nullable: true
+          format: uri
+          example: https://app.beanworks.com/invoices/12345
+        currency:
+          type: string
+          nullable: true
+          maxLength: 10
+          example: USD
+        companyId:
+          type: string
+          nullable: true
+          maxLength: 20
+          example: '001'
+        totalAmount:
+          type: number
+          format: double
+          example: 125.00
+        lines:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/QuadientInvoiceLineRequest'
+      description: One invoice per POST request. Either vendorKey or vendorId must be supplied; vendorKey is preferred for Sage/DIM processing.
 
-    UpdateResponse:
+    QuadientInvoiceLineRequest:
+      type: object
+      required:
+        - unitCost
+        - quantity
+        - lineAmount
+        - poLineKey
+        - rcvrLineKey
+      properties:
+        lineNumber:
+          type: integer
+          nullable: true
+          example: 1
+        itemKey:
+          type: integer
+          nullable: true
+          example: 456
+        itemId:
+          type: string
+          nullable: true
+          maxLength: 100
+          example: LAM-PACO-2
+        unitCost:
+          type: number
+          format: double
+          example: 12.50
+        quantity:
+          type: number
+          format: double
+          example: 10
+        unitMeasure:
+          type: string
+          nullable: true
+          maxLength: 20
+          example: EA
+        unitMeasKey:
+          type: integer
+          nullable: true
+          example: 1
+        lineAmount:
+          type: number
+          format: double
+          example: 125.00
+        poKey:
+          type: integer
+          nullable: true
+          description: Sage 500 tpoPurchOrder.POKey.
+          example: 10001
+        poNumber:
+          type: string
+          nullable: true
+          maxLength: 50
+          example: '00007195'
+        poLineKey:
+          type: integer
+          description: Sage 500 tpoPOLine.POLineKey.
+          example: 20001
+        poLineNumber:
+          type: integer
+          nullable: true
+          example: 1
+        rcvrLineKey:
+          type: integer
+          description: Sage 500 tpoRcvrLine.RcvrLineKey. Critical 3-way match identifier.
+          example: 30001
+        description:
+          type: string
+          nullable: true
+          example: Invoice line description
+        sTaxClassKey:
+          type: integer
+          nullable: true
+          description: Sage 500 tciSTaxClass.STaxClassKey when applicable.
+          example: null
+        department:
+          type: string
+          nullable: true
+          maxLength: 50
+          example: OPS
+        costCenter:
+          type: string
+          nullable: true
+          maxLength: 50
+          example: '100'
+
+    QuadientInvoiceResponse:
       type: object
       properties:
-        success:
-          type: boolean
+        status:
+          type: string
+          example: received
+        processingStatus:
+          type: string
+          example: ReadyForDIM
+        stagingId:
+          type: integer
+          example: 101
+        invoiceNumber:
+          type: string
+          example: INV-12345
+        vendorKey:
+          type: integer
+          nullable: true
+          example: 123
+        vendorId:
+          type: string
+          nullable: true
+          example: INSUL
+        lineCount:
+          type: integer
+          example: 3
+
+    ValidationError:
+      type: object
+      properties:
+        error:
+          type: string
+          example: VALIDATION_FAILED
         message:
           type: string
-        referenceId:
-          type: string
+          example: Invoice payload failed validation
+        details:
+          type: array
+          items:
+            type: string
 
     ErrorResponse:
       type: object
       properties:
         error:
           type: string
+          example: QUERY_FAILED
         message:
           type: string
+          example: Error details
