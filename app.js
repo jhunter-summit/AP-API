@@ -533,7 +533,7 @@ app.get('/statements', async (req, res) => {
   }
 });
 
-app.post('/quadient/invoices', async (req, res) => {
+app.post('/quadient/invoice', async (req, res) => {
   const payload = req.body;
 
   try {
