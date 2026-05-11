@@ -7,7 +7,30 @@ const sql = require('mssql');
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
+
+app.use((req, res, next) => {
+  const start = Date.now();
+
+  res.on('finish', () => {
+    const elapsedMs = Date.now() - start;
+
+    writeLog('api.log', 'REQUEST', {
+      method: req.method,
+      url: req.originalUrl,
+      statusCode: res.statusCode,
+      elapsedMs,
+      ip: req.ip,
+      userAgent: req.get('user-agent') || null
+    });
+  });
+
+  next();
+});
+
 const port = process.env.PORT || 3000;
+
+const fs = require('fs');
+const path = require('path');
 
 const config = {
   server: process.env.DB_SERVER,
@@ -29,6 +52,31 @@ console.log({
   port: config.port,
   passwordLength: config.password?.length
 });
+
+const logDir = path.join(__dirname, 'logs');
+
+if (!fs.existsSync(logDir)) {
+  fs.mkdirSync(logDir, { recursive: true });
+}
+
+function writeLog(fileName, message, data = null) {
+  const timestamp = new Date().toISOString();
+  const logPath = path.join(logDir, fileName);
+
+  let line = `[${timestamp}] ${message}`;
+
+  if (data !== null && data !== undefined) {
+    line += ` ${JSON.stringify(data)}`;
+  }
+
+  line += '\n';
+
+  fs.appendFile(logPath, line, err => {
+    if (err) {
+      console.error('Failed to write log:', err);
+    }
+  });
+}
 
 function validateQuadientInvoice(payload) {
   const errors = [];
@@ -536,10 +584,25 @@ app.get('/statements', async (req, res) => {
 app.post('/quadient/invoice', async (req, res) => {
   const payload = req.body;
 
+  writeLog('quadient-invoice.log', 'INVOICE_POST_RECEIVED', {
+    invoiceNumber: payload?.invoiceNumber || null,
+    vendorKey: payload?.vendorKey || null,
+    vendorId: payload?.vendorId || null,
+    companyId: payload?.companyId || null,
+    totalAmount: payload?.totalAmount || null,
+    lineCount: Array.isArray(payload?.lines) ? payload.lines.length : null,
+    payload
+  });
+
   try {
     const validationErrors = validateQuadientInvoice(payload);
 
     if (validationErrors.length > 0) {
+      writeLog('quadient-invoice.log', 'INVOICE_VALIDATION_FAILED', {
+        invoiceNumber: payload?.invoiceNumber || null,
+        errors: validationErrors,
+        payload
+      });
       return res.status(400).json({
         error: 'VALIDATION_FAILED',
         message: 'Invoice payload failed validation',
@@ -668,6 +731,14 @@ app.post('/quadient/invoice', async (req, res) => {
 
       await transaction.commit();
 
+      writeLog('quadient-invoice.log', 'INVOICE_STAGED', {
+        stagingId,
+        invoiceNumber: payload.invoiceNumber,
+        vendorKey: payload.vendorKey ?? null,
+        vendorId: payload.vendorId || null,
+        lineCount: payload.lines.length
+      });
+
       return res.status(201).json({
         status: 'received',
         processingStatus: 'ReadyForDIM',
@@ -679,6 +750,17 @@ app.post('/quadient/invoice', async (req, res) => {
       });
 
     } catch (err) {
+
+      writeLog('quadient-invoice.log', 'INVOICE_RECEIVE_FAILED', {
+        message: err.message,
+        stack: err.stack,
+        invoiceNumber: payload?.invoiceNumber || null,
+        vendorKey: payload?.vendorKey || null,
+        vendorId: payload?.vendorId || null
+      });
+
+      console.error('Quadient invoice receive failed:', err);
+
       await transaction.rollback();
       throw err;
     }
