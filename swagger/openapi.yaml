@@ -28,7 +28,7 @@ info:
     - The inbound invoice endpoint stores invoice data in staging tables only. It does not write directly to Sage 500 voucher tables.
 
 servers:
-  - url: http://localhost:3000
+  - url: http://localhost:443
     description: Local testing endpoint
 
 security:
