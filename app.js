@@ -27,7 +27,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const port = process.env.PORT || 443;
+const port = process.env.PORT || 3000;
 
 const fs = require('fs');
 const path = require('path');
