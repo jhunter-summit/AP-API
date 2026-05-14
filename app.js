@@ -7,7 +7,7 @@ const sql = require('mssql');
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
-
+app.set('trust proxy', true);
 app.use((req, res, next) => {
   const start = Date.now();
 
