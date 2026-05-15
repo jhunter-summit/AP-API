@@ -46,7 +46,7 @@ info:
     '
 servers:
 - url: https://sicxyz001.summitinterconnect.com/
-  description: Local testing endpoint
+  description: Live endpoint
 security:
 - ApiKeyAuth: []
 tags:
