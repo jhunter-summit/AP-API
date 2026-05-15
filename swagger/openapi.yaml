@@ -1,59 +1,72 @@
 openapi: 3.0.3
-
 info:
   title: Summit / Quadient / Sage 500 AP Integration API
-  version: 1.1.0
-  description: |
-    API for Quadient Beanworks to retrieve Sage 500 data and send invoice information back to Summit.
+  version: 1.2.0
+  description: 'API for Quadient Beanworks to retrieve Sage 500 data and send invoice information back to Summit.
+
 
     Current outbound GET endpoints:
+
     - Health / diagnostics
+
     - Companies
+
     - G/L Accounts
+
     - Customers
+
     - Vendors
+
     - Purchase Orders
+
     - Receipts / Receiving Info
+
     - Open AP Invoices
+
     - Customer Statements
 
+
     Current inbound POST endpoints:
+
     - Quadient invoice staging for Sage 500 Data Import Manager processing
 
+
     Notes:
+
     - Date/time values are returned from Sage 500.
+
     - Incremental endpoints support updatedSince where applicable.
+
     - Quadient is responsible for tracking the last successful sync date.
+
     - API key authentication uses the x-api-key request header.
+
     - The inbound invoice endpoint stores invoice data in staging tables only. It does not write directly to Sage 500 voucher tables.
 
+    '
 servers:
-  - url: http://76.83.26.67:443
-    description: Local testing endpoint
-
+- url: http://localhost:3000
+  description: Local testing endpoint
 security:
-  - ApiKeyAuth: []
-
+- ApiKeyAuth: []
 tags:
-  - name: Diagnostics
-  - name: Reference
-  - name: GL Accounts
-  - name: Customers
-  - name: Vendors
-  - name: Purchase Orders
-  - name: Receipts
-  - name: AP Invoices
-  - name: AR Statements
-  - name: Quadient Inbound
-
+- name: Diagnostics
+- name: Reference
+- name: GL Accounts
+- name: Customers
+- name: Vendors
+- name: Purchase Orders
+- name: Receipts
+- name: AP Invoices
+- name: AR Statements
+- name: Quadient Inbound
 paths:
-
   /health:
     get:
       summary: Health check
       description: Returns basic API health information. This endpoint may be left unauthenticated depending on deployment configuration.
       tags:
-        - Diagnostics
+      - Diagnostics
       responses:
         '200':
           description: API is running
@@ -61,13 +74,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
-
   /db-test:
     get:
       summary: Test database connectivity
       description: Tests whether the API can connect to the Sage 500 SQL Server database.
       tags:
-        - Diagnostics
+      - Diagnostics
       responses:
         '200':
           description: Database connection successful
@@ -79,13 +91,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/ServerError'
-
   /companies:
     get:
       summary: Get companies
       description: Returns companies available from Sage 500.
       tags:
-        - Reference
+      - Reference
       responses:
         '200':
           description: Companies
@@ -97,12 +108,11 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/ServerError'
-
   /gl-accounts:
     get:
       summary: Get G/L account list
       tags:
-        - GL Accounts
+      - GL Accounts
       responses:
         '200':
           description: G/L accounts
@@ -114,15 +124,14 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/ServerError'
-
   /customers:
     get:
       summary: Get customer list
       tags:
-        - Customers
+      - Customers
       parameters:
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
           description: Customers
@@ -134,17 +143,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/ServerError'
-
   /vendors:
     get:
       summary: Get vendor list
       description: Returns vendors from Sage 500. VendKey should be used for Sage/DIM writeback matching when available.
       tags:
-        - Vendors
+      - Vendors
       parameters:
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/PageSize'
-        - $ref: '#/components/parameters/UpdatedSince'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/UpdatedSince'
       responses:
         '200':
           description: Vendors
@@ -156,17 +164,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/ServerError'
-
   /purchase-orders:
     get:
       summary: Get purchase orders
       description: Returns purchase orders grouped by header, with line items nested under each purchase order.
       tags:
-        - Purchase Orders
+      - Purchase Orders
       parameters:
-        - $ref: '#/components/parameters/UpdatedSince'
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/UpdatedSince'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
           description: Purchase orders
@@ -178,17 +185,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/ServerError'
-
   /receipts:
     get:
       summary: Get receiving information
       description: Returns receipt / receiving information from Sage 500.
       tags:
-        - Receipts
+      - Receipts
       parameters:
-        - $ref: '#/components/parameters/UpdatedSince'
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/UpdatedSince'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
           description: Receipts / receiving info
@@ -200,17 +206,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/ServerError'
-
   /invoices:
     get:
       summary: Get open AP invoices
-      description: Returns open AP invoices from Sage 500. Open is currently determined by non-zero balance.
+      description: Returns open AP invoice headers from Sage 500. Open is currently determined by non-zero balance. Use /invoice-lines for invoice line detail, or /invoices-with-lines for a convenience/testing response that includes nested line items.
       tags:
-        - AP Invoices
+      - AP Invoices
       parameters:
-        - $ref: '#/components/parameters/UpdatedSince'
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/UpdatedSince'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
           description: Open AP invoices
@@ -222,22 +227,173 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/ServerError'
-
+  /invoice-lines:
+    get:
+      summary: Get AP invoice line items
+      description: Returns AP invoice line detail records from Sage 500. This endpoint returns line items directly and includes related invoice/vendor context plus PO quantity information from the PO line distribution table.
+      tags:
+      - AP Invoices
+      security:
+      - ApiKeyAuth: []
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/UpdatedSince'
+      - name: voucherKey
+        in: query
+        required: false
+        description: Filter line items to a specific Sage voucher key.
+        schema:
+          type: integer
+        example: 216838
+      - name: invoiceNumber
+        in: query
+        required: false
+        description: Filter line items to a specific invoice number.
+        schema:
+          type: string
+        example: INV-12345
+      responses:
+        '200':
+          description: Invoice line detail records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceLineList'
+              example:
+                page: 1
+                pageSize: 100
+                count: 1
+                data:
+                - voucherKey: 216838
+                  invoiceNumber: INV-12345
+                  invoiceDate: '2026-05-07T00:00:00.000Z'
+                  dueDate: '2026-06-06T00:00:00.000Z'
+                  companyId: '001'
+                  vendKey: 12345
+                  vendorId: INSUL
+                  vendorName: Insulectro (EFT)
+                  voucherLineKey: 393424
+                  lineNumber: 1
+                  poLineKey: 147845
+                  rcvrLineKey: 149778
+                  itemKey: 555
+                  description: Invoice line description
+                  extendedComment: null
+                  unitCost: 12.5
+                  unitCostExact: 12.5
+                  unitMeasKey: 1
+                  lineAmount: 125
+                  sTaxClassKey: null
+                  matchStatus: 2
+                  returnType: 0
+                  targetCompanyId: '001'
+                  quantityOrdered: 10
+                  quantityReceived: 10
+                  quantityInvoiced: 10
+                  quantityOpenToReceive: 0
+                  quantityReturnedForCredit: 0
+                  quantityReturnedForReplacement: 0
+                  glAccountKey: 12345
+                  calculatedInvoiceQuantity: 10
+        '400':
+          description: Invalid query parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: VALIDATION_FAILED
+                message: voucherKey must be a valid integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /invoices-with-lines:
+    get:
+      summary: Get open AP invoices with nested line items
+      description: Convenience/testing endpoint that returns open AP invoice headers from Sage 500 with nested invoice line detail records. Production integrations may prefer the separate /invoices and /invoice-lines endpoints.
+      tags:
+      - AP Invoices
+      security:
+      - ApiKeyAuth: []
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/UpdatedSince'
+      responses:
+        '200':
+          description: Open AP invoices with nested line detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoiceWithLinesList'
+              example:
+                page: 1
+                pageSize: 100
+                count: 1
+                data:
+                - voucherKey: 216838
+                  companyId: '001'
+                  invoiceNumber: INV-12345
+                  invoiceDate: '2026-05-07T00:00:00.000Z'
+                  postDate: null
+                  invoiceReceiptDate: '2026-05-07T00:00:00.000Z'
+                  dueDate: '2026-06-06T00:00:00.000Z'
+                  invoiceAmount: 125
+                  purchaseAmount: 125
+                  balance: 125
+                  statusCode: 2
+                  status: Open
+                  invoiceDescription: Invoice memo
+                  createdAt: '2026-05-07T13:21:00.000Z'
+                  updatedAt: '2026-05-07T13:21:00.000Z'
+                  vendKey: 12345
+                  vendorId: INSUL
+                  vendorName: Insulectro (EFT)
+                  lines:
+                  - voucherLineKey: 393424
+                    lineNumber: 1
+                    poLineKey: 147845
+                    rcvrLineKey: 149778
+                    itemKey: 555
+                    description: Invoice line description
+                    extendedComment: null
+                    unitCost: 12.5
+                    unitCostExact: 12.5
+                    unitMeasKey: 1
+                    lineAmount: 125
+                    sTaxClassKey: null
+                    matchStatus: 2
+                    returnType: 0
+                    targetCompanyId: '001'
+                    quantityOrdered: 10
+                    quantityReceived: 10
+                    quantityInvoiced: 10
+                    quantityOpenToReceive: 0
+                    quantityReturnedForCredit: 0
+                    quantityReturnedForReplacement: 0
+                    glAccountKey: 12345
+                    calculatedInvoiceQuantity: 10
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
   /statements:
     get:
       summary: Get customer statement-style open AR data
       description: Returns open customer invoice/balance data used to generate statement-style information.
       tags:
-        - AR Statements
+      - AR Statements
       parameters:
-        - $ref: '#/components/parameters/UpdatedSince'
-        - name: customerId
-          in: query
-          required: false
-          schema:
-            type: string
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/UpdatedSince'
+      - name: customerId
+        in: query
+        required: false
+        schema:
+          type: string
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
           description: Statement data
@@ -249,16 +405,15 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/ServerError'
-
   /quadient/invoice:
     post:
-      summary: Receive invoice from Quadient Beanworks
-      description: |
-        Receives one 3-way matched invoice per request from Quadient Beanworks and stores it in staging tables for Sage 500 Data Import Manager processing.
+      summary: Receive one invoice from Quadient Beanworks
+      description: 'Receives one 3-way matched invoice per request from Quadient Beanworks and stores it in staging tables for Sage 500 Data Import Manager processing.
 
-        This endpoint does not write directly to Sage 500 voucher tables. After staging, Net@Work / Sage DIM can import from the DIM-facing views and then update the staging status.
+
+        This endpoint does not write directly to Sage 500 voucher tables. After staging, Net@Work / Sage DIM can import from the DIM-facing views and then update the staging status.'
       tags:
-        - Quadient Inbound
+      - Quadient Inbound
       requestBody:
         required: true
         content:
@@ -275,25 +430,25 @@ paths:
               beanworksInvoiceUrl: https://example.com/beanworks/invoice/TEST-BEAN-1001
               currency: USD
               companyId: '001'
-              totalAmount: 125.00
+              totalAmount: 125.0
               lines:
-                - lineNumber: 1
-                  itemKey: 456
-                  itemId: TESTITEM
-                  unitCost: 12.50
-                  quantity: 10
-                  unitMeasure: EA
-                  unitMeasKey: 1
-                  lineAmount: 125.00
-                  poKey: 10001
-                  poNumber: PO-TEST-001
-                  poLineKey: 20001
-                  poLineNumber: 1
-                  rcvrLineKey: 30001
-                  description: Test invoice line
-                  sTaxClassKey: null
-                  department: TEST
-                  costCenter: TEST
+              - lineNumber: 1
+                itemKey: 456
+                itemId: TESTITEM
+                unitCost: 12.5
+                quantity: 10
+                unitMeasure: EA
+                unitMeasKey: 1
+                lineAmount: 125.0
+                poKey: 10001
+                poNumber: PO-TEST-001
+                poLineKey: 20001
+                poLineNumber: 1
+                rcvrLineKey: 30001
+                description: Test invoice line
+                sTaxClassKey: null
+                department: TEST
+                costCenter: TEST
       responses:
         '201':
           description: Invoice received and staged for DIM import
@@ -319,8 +474,8 @@ paths:
                 error: VALIDATION_FAILED
                 message: Invoice payload failed validation
                 details:
-                  - invoiceNumber is required
-                  - lines[0].rcvrLineKey is required
+                - invoiceNumber is required
+                - lines[0].rcvrLineKey is required
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
@@ -332,17 +487,13 @@ paths:
               example:
                 error: INVOICE_RECEIVE_FAILED
                 message: SQL insert failed
-
 components:
-
   securitySchemes:
     ApiKeyAuth:
       type: apiKey
       in: header
       name: x-api-key
-
   parameters:
-
     UpdatedSince:
       name: updatedSince
       in: query
@@ -352,7 +503,6 @@ components:
         format: date-time
       description: Return records updated on or after this date/time where supported.
       example: '2026-05-01T00:00:00Z'
-
     Page:
       name: page
       in: query
@@ -362,7 +512,6 @@ components:
         minimum: 1
         default: 1
       description: Page number, starting at 1.
-
     PageSize:
       name: pageSize
       in: query
@@ -373,16 +522,13 @@ components:
         maximum: 500
         default: 100
       description: Number of records per page.
-
   responses:
-
     BadRequest:
       description: Invalid request
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
-
     Unauthorized:
       description: Missing or invalid API key
       content:
@@ -392,7 +538,6 @@ components:
           example:
             error: Unauthorized
             message: Missing or invalid API key
-
     ServerError:
       description: Server error
       content:
@@ -402,9 +547,7 @@ components:
           example:
             error: QUERY_FAILED
             message: Database query failed
-
   schemas:
-
     HealthResponse:
       type: object
       properties:
@@ -414,7 +557,6 @@ components:
         message:
           type: string
           example: API is running
-
     DbTestResponse:
       type: object
       properties:
@@ -424,7 +566,6 @@ components:
         message:
           type: string
           example: Database connection successful
-
     Pagination:
       type: object
       properties:
@@ -434,7 +575,6 @@ components:
         pageSize:
           type: integer
           example: 100
-
     PagedResponseBase:
       type: object
       properties:
@@ -447,17 +587,15 @@ components:
         count:
           type: integer
           example: 1
-
     CompanyList:
       allOf:
-        - $ref: '#/components/schemas/PagedResponseBase'
-        - type: object
-          properties:
-            data:
-              type: array
-              items:
-                $ref: '#/components/schemas/Company'
-
+      - $ref: '#/components/schemas/PagedResponseBase'
+      - type: object
+        properties:
+          data:
+            type: array
+            items:
+              $ref: '#/components/schemas/Company'
     Company:
       type: object
       properties:
@@ -467,23 +605,21 @@ components:
         companyName:
           type: string
           example: Summit Interconnect
-
     GLAccountList:
       allOf:
-        - $ref: '#/components/schemas/PagedResponseBase'
-        - type: object
-          properties:
-            data:
-              type: array
-              items:
-                $ref: '#/components/schemas/GLAccount'
-
+      - $ref: '#/components/schemas/PagedResponseBase'
+      - type: object
+        properties:
+          data:
+            type: array
+            items:
+              $ref: '#/components/schemas/GLAccount'
     GLAccount:
       type: object
       properties:
         accountNumber:
           type: string
-          example: '4000-000'
+          example: 4000-000
         description:
           type: string
           example: Sales Revenue
@@ -491,17 +627,15 @@ components:
           type: integer
           description: 1 = active, 0 = inactive
           example: 1
-
     CustomerList:
       allOf:
-        - $ref: '#/components/schemas/PagedResponseBase'
-        - type: object
-          properties:
-            data:
-              type: array
-              items:
-                $ref: '#/components/schemas/Customer'
-
+      - $ref: '#/components/schemas/PagedResponseBase'
+      - type: object
+        properties:
+          data:
+            type: array
+            items:
+              $ref: '#/components/schemas/Customer'
     Customer:
       type: object
       properties:
@@ -514,17 +648,15 @@ components:
         companyId:
           type: string
           example: '001'
-
     VendorList:
       allOf:
-        - $ref: '#/components/schemas/PagedResponseBase'
-        - type: object
-          properties:
-            data:
-              type: array
-              items:
-                $ref: '#/components/schemas/Vendor'
-
+      - $ref: '#/components/schemas/PagedResponseBase'
+      - type: object
+        properties:
+          data:
+            type: array
+            items:
+              $ref: '#/components/schemas/Vendor'
     Vendor:
       type: object
       properties:
@@ -547,17 +679,15 @@ components:
           type: string
           format: date-time
           nullable: true
-
     PurchaseOrderList:
       allOf:
-        - $ref: '#/components/schemas/PagedResponseBase'
-        - type: object
-          properties:
-            data:
-              type: array
-              items:
-                $ref: '#/components/schemas/PurchaseOrder'
-
+      - $ref: '#/components/schemas/PagedResponseBase'
+      - type: object
+        properties:
+          data:
+            type: array
+            items:
+              $ref: '#/components/schemas/PurchaseOrder'
     PurchaseOrder:
       type: object
       properties:
@@ -566,7 +696,7 @@ components:
           example: 10001
         poNumber:
           type: string
-          example: '00007195'
+          example: 00007195
         poDate:
           type: string
           format: date-time
@@ -586,12 +716,11 @@ components:
         poTotal:
           type: number
           nullable: true
-          example: 9572.00
+          example: 9572.0
         lines:
           type: array
           items:
             $ref: '#/components/schemas/PurchaseOrderLine'
-
     PurchaseOrderLine:
       type: object
       properties:
@@ -614,25 +743,23 @@ components:
           example: Purchase order line description
         unitCost:
           type: number
-          example: 12.50
+          example: 12.5
         lineAmount:
           type: number
-          example: 125.00
+          example: 125.0
         quantityOrdered:
           type: number
           nullable: true
           example: 10
-
     ReceiptList:
       allOf:
-        - $ref: '#/components/schemas/PagedResponseBase'
-        - type: object
-          properties:
-            data:
-              type: array
-              items:
-                $ref: '#/components/schemas/Receipt'
-
+      - $ref: '#/components/schemas/PagedResponseBase'
+      - type: object
+        properties:
+          data:
+            type: array
+            items:
+              $ref: '#/components/schemas/Receipt'
     Receipt:
       type: object
       properties:
@@ -676,7 +803,7 @@ components:
           example: 10001
         poNumber:
           type: string
-          example: '00007195'
+          example: 00007195
         poLineKey:
           type: integer
           example: 20001
@@ -691,22 +818,20 @@ components:
           type: string
         unitCost:
           type: number
-          example: 12.50
+          example: 12.5
         taxAmount:
           type: number
           nullable: true
           example: 0
-
     InvoiceList:
       allOf:
-        - $ref: '#/components/schemas/PagedResponseBase'
-        - type: object
-          properties:
-            data:
-              type: array
-              items:
-                $ref: '#/components/schemas/Invoice'
-
+      - $ref: '#/components/schemas/PagedResponseBase'
+      - type: object
+        properties:
+          data:
+            type: array
+            items:
+              $ref: '#/components/schemas/Invoice'
     Invoice:
       type: object
       properties:
@@ -735,14 +860,14 @@ components:
           format: date-time
         invoiceAmount:
           type: number
-          example: 125.00
+          example: 125.0
         purchaseAmount:
           type: number
           nullable: true
-          example: 125.00
+          example: 125.0
         balance:
           type: number
-          example: 125.00
+          example: 125.0
         statusCode:
           type: integer
         status:
@@ -769,17 +894,15 @@ components:
         vendorName:
           type: string
           example: Insulectro (EFT)
-
     StatementList:
       allOf:
-        - $ref: '#/components/schemas/PagedResponseBase'
-        - type: object
-          properties:
-            data:
-              type: array
-              items:
-                $ref: '#/components/schemas/Statement'
-
+      - $ref: '#/components/schemas/PagedResponseBase'
+      - type: object
+        properties:
+          data:
+            type: array
+            items:
+              $ref: '#/components/schemas/Statement'
     Statement:
       type: object
       properties:
@@ -809,15 +932,14 @@ components:
           type: string
           format: date-time
           nullable: true
-
     QuadientInvoiceRequest:
       type: object
       required:
-        - invoiceNumber
-        - invoiceDate
-        - dueDate
-        - totalAmount
-        - lines
+      - invoiceNumber
+      - invoiceDate
+      - dueDate
+      - totalAmount
+      - lines
       properties:
         invoiceNumber:
           type: string
@@ -864,22 +986,21 @@ components:
         totalAmount:
           type: number
           format: double
-          example: 125.00
+          example: 125.0
         lines:
           type: array
           minItems: 1
           items:
             $ref: '#/components/schemas/QuadientInvoiceLineRequest'
       description: One invoice per POST request. Either vendorKey or vendorId must be supplied; vendorKey is preferred for Sage/DIM processing.
-
     QuadientInvoiceLineRequest:
       type: object
       required:
-        - unitCost
-        - quantity
-        - lineAmount
-        - poLineKey
-        - rcvrLineKey
+      - unitCost
+      - quantity
+      - lineAmount
+      - poLineKey
+      - rcvrLineKey
       properties:
         lineNumber:
           type: integer
@@ -897,7 +1018,7 @@ components:
         unitCost:
           type: number
           format: double
-          example: 12.50
+          example: 12.5
         quantity:
           type: number
           format: double
@@ -914,7 +1035,7 @@ components:
         lineAmount:
           type: number
           format: double
-          example: 125.00
+          example: 125.0
         poKey:
           type: integer
           nullable: true
@@ -924,7 +1045,7 @@ components:
           type: string
           nullable: true
           maxLength: 50
-          example: '00007195'
+          example: 00007195
         poLineKey:
           type: integer
           description: Sage 500 tpoPOLine.POLineKey.
@@ -956,7 +1077,6 @@ components:
           nullable: true
           maxLength: 50
           example: '100'
-
     QuadientInvoiceResponse:
       type: object
       properties:
@@ -983,7 +1103,6 @@ components:
         lineCount:
           type: integer
           example: 3
-
     ValidationError:
       type: object
       properties:
@@ -997,7 +1116,6 @@ components:
           type: array
           items:
             type: string
-
     ErrorResponse:
       type: object
       properties:
@@ -1007,3 +1125,254 @@ components:
         message:
           type: string
           example: Error details
+    InvoiceLineList:
+      allOf:
+      - $ref: '#/components/schemas/PagedResponseBase'
+      - type: object
+        properties:
+          data:
+            type: array
+            items:
+              $ref: '#/components/schemas/InvoiceLine'
+    InvoiceLine:
+      type: object
+      properties:
+        voucherKey:
+          type: integer
+          description: Sage 500 tapVoucher.VoucherKey.
+          example: 216838
+        invoiceNumber:
+          type: string
+          description: Sage invoice number from tapVoucher.TranID.
+          example: INV-12345
+        invoiceDate:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2026-05-07T00:00:00.000Z'
+        dueDate:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2026-06-06T00:00:00.000Z'
+        companyId:
+          type: string
+          example: '001'
+        vendKey:
+          type: integer
+          description: Sage 500 tapVendor.VendKey.
+          example: 12345
+        vendorId:
+          type: string
+          example: INSUL
+        vendorName:
+          type: string
+          example: Insulectro (EFT)
+        voucherLineKey: &id001
+          type: integer
+          description: Sage 500 tapVoucherDetl.VoucherLineKey.
+          example: 393424
+        lineNumber: &id002
+          type: integer
+          description: Sage voucher detail sequence number.
+          example: 1
+        poLineKey: &id003
+          type: integer
+          nullable: true
+          description: Sage 500 tpoPOLine.POLineKey.
+          example: 147845
+        rcvrLineKey: &id004
+          type: integer
+          nullable: true
+          description: Sage 500 tpoRcvrLine.RcvrLineKey used for 3-way match linkage.
+          example: 149778
+        itemKey: &id005
+          type: integer
+          nullable: true
+          example: 555
+        description: &id006
+          type: string
+          nullable: true
+          example: Invoice line description
+        extendedComment: &id007
+          type: string
+          nullable: true
+          example: null
+        unitCost: &id008
+          type: number
+          nullable: true
+          example: 12.5
+        unitCostExact: &id009
+          type: number
+          nullable: true
+          example: 12.5
+        unitMeasKey: &id010
+          type: integer
+          nullable: true
+          example: 1
+        lineAmount: &id011
+          type: number
+          example: 125
+        sTaxClassKey: &id012
+          type: integer
+          nullable: true
+          example: null
+        matchStatus: &id013
+          type: integer
+          example: 2
+        returnType: &id014
+          type: integer
+          example: 0
+        targetCompanyId: &id015
+          type: string
+          example: '001'
+        quantityOrdered: &id016
+          type: number
+          nullable: true
+          description: Quantity ordered from tpoPOLineDist.QtyOrd.
+          example: 10
+        quantityReceived: &id017
+          type: number
+          nullable: true
+          description: Quantity received from tpoPOLineDist.QtyRcvd.
+          example: 10
+        quantityInvoiced: &id018
+          type: number
+          nullable: true
+          description: Quantity invoiced from tpoPOLineDist.QtyInvcd.
+          example: 10
+        quantityOpenToReceive: &id019
+          type: number
+          nullable: true
+          description: Quantity open to receive from tpoPOLineDist.QtyOpenToRcv.
+          example: 0
+        quantityReturnedForCredit: &id020
+          type: number
+          nullable: true
+          description: Quantity returned for credit from tpoPOLineDist.QtyRtrnCredit.
+          example: 0
+        quantityReturnedForReplacement: &id021
+          type: number
+          nullable: true
+          description: Quantity returned for replacement from tpoPOLineDist.QtyRtrnReplacement.
+          example: 0
+        glAccountKey: &id022
+          type: integer
+          nullable: true
+          description: Sage G/L account key from tpoPOLineDist.GLAcctKey.
+          example: 12345
+        calculatedInvoiceQuantity: &id023
+          type: number
+          nullable: true
+          description: Calculated as lineAmount / unitCost when unitCost is nonzero.
+          example: 10
+    InvoiceWithLinesList:
+      allOf:
+      - $ref: '#/components/schemas/PagedResponseBase'
+      - type: object
+        properties:
+          data:
+            type: array
+            items:
+              $ref: '#/components/schemas/InvoiceWithLines'
+    InvoiceLineNested:
+      type: object
+      properties:
+        voucherLineKey: *id001
+        lineNumber: *id002
+        poLineKey: *id003
+        rcvrLineKey: *id004
+        itemKey: *id005
+        description: *id006
+        extendedComment: *id007
+        unitCost: *id008
+        unitCostExact: *id009
+        unitMeasKey: *id010
+        lineAmount: *id011
+        sTaxClassKey: *id012
+        matchStatus: *id013
+        returnType: *id014
+        targetCompanyId: *id015
+        quantityOrdered: *id016
+        quantityReceived: *id017
+        quantityInvoiced: *id018
+        quantityOpenToReceive: *id019
+        quantityReturnedForCredit: *id020
+        quantityReturnedForReplacement: *id021
+        glAccountKey: *id022
+        calculatedInvoiceQuantity: *id023
+    InvoiceWithLines:
+      type: object
+      properties:
+        voucherKey:
+          type: integer
+          example: 216838
+        companyId:
+          type: string
+          example: '001'
+        invoiceNumber:
+          type: string
+          example: INV-12345
+        invoiceDate:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2026-05-07T00:00:00.000Z'
+        postDate:
+          type: string
+          format: date-time
+          nullable: true
+          example: null
+        invoiceReceiptDate:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2026-05-07T00:00:00.000Z'
+        dueDate:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2026-06-06T00:00:00.000Z'
+        invoiceAmount:
+          type: number
+          example: 125
+        purchaseAmount:
+          type: number
+          nullable: true
+          example: 125
+        balance:
+          type: number
+          example: 125
+        statusCode:
+          type: integer
+          example: 2
+        status:
+          type: string
+          example: Open
+        invoiceDescription:
+          type: string
+          nullable: true
+          example: Invoice memo
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2026-05-07T13:21:00.000Z'
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2026-05-07T13:21:00.000Z'
+        vendKey:
+          type: integer
+          example: 12345
+        vendorId:
+          type: string
+          example: INSUL
+        vendorName:
+          type: string
+          example: Insulectro (EFT)
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/InvoiceLineNested'

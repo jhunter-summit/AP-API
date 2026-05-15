@@ -323,6 +323,258 @@ app.get('/invoices', async (req, res) => {
   }
 });
 
+app.get('/invoices-with-lines', async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '100', 10), 1), 500);
+    const offset = (page - 1) * pageSize;
+
+    const updatedSince = req.query.updatedSince || null;
+
+    // ============================
+    // STEP 1: Page invoice headers
+    // ============================
+    const headerRequest = pool.request()
+      .input('updatedSince', updatedSince)
+      .input('offset', offset)
+      .input('pageSize', pageSize);
+
+    const headerResult = await headerRequest.query(`
+      SELECT
+          inv.VoucherKey AS voucherKey,
+          inv.CompanyID AS companyId,
+          inv.TranID AS invoiceNumber,
+          inv.TranDate AS invoiceDate,
+          inv.PostDate AS postDate,
+          inv.InvcRcptDate AS invoiceReceiptDate,
+          inv.DueDate AS dueDate,
+          inv.TranAmt AS invoiceAmount,
+          inv.PurchAmt AS purchaseAmount,
+          inv.Balance AS balance,
+          inv.Status AS statusCode,
+          CASE inv.Status
+              WHEN 2 THEN 'Open'
+              WHEN 1 THEN 'Closed'
+              ELSE 'Unknown'
+          END AS status,
+          inv.TranCmnt AS invoiceDescription,
+          inv.CreateDate AS createdAt,
+          inv.UpdateDate AS updatedAt,
+          inv.VendKey AS vendKey,
+          v.VendID AS vendorId,
+          v.VendName AS vendorName
+      FROM dbo.tapVoucher inv
+      INNER JOIN dbo.tapVendor v
+          ON inv.VendKey = v.VendKey
+      WHERE
+          inv.Balance <> 0
+          AND (@updatedSince IS NULL OR inv.UpdateDate >= @updatedSince)
+      ORDER BY inv.UpdateDate DESC, inv.VoucherKey
+      OFFSET @offset ROWS
+      FETCH NEXT @pageSize ROWS ONLY;
+    `);
+
+    const invoices = headerResult.recordset;
+
+    if (invoices.length === 0) {
+      return res.json({
+        page,
+        pageSize,
+        count: 0,
+        data: []
+      });
+    }
+
+    // ============================
+    // STEP 2: Fetch lines for those invoices
+    // ============================
+    const voucherKeys = invoices.map(inv => inv.voucherKey);
+
+    const lineRequest = pool.request();
+
+    const voucherKeyParams = voucherKeys.map((voucherKey, index) => {
+      const paramName = `voucherKey${index}`;
+      lineRequest.input(paramName, voucherKey);
+      return `@${paramName}`;
+    });
+
+    const lineResult = await lineRequest.query(`
+      SELECT
+          d.VoucherKey AS voucherKey,
+          d.VoucherLineKey AS voucherLineKey,
+          d.SeqNo AS lineNumber,
+          d.POLineKey AS poLineKey,
+          d.RcvrLineKey AS rcvrLineKey,
+          d.ItemKey AS itemKey,
+          d.Description AS description,
+          d.ExtCmnt AS extendedComment,
+          d.UnitCost AS unitCost,
+          d.UnitCostExact AS unitCostExact,
+          d.UnitMeasKey AS unitMeasKey,
+          d.ExtAmt AS lineAmount,
+          d.STaxClassKey AS sTaxClassKey,
+          d.MatchStatus AS matchStatus,
+          d.ReturnType AS returnType,
+          d.TargetCompanyID AS targetCompanyId,
+
+          pold.QtyOrd AS quantityOrdered,
+          pold.QtyRcvd AS quantityReceived,
+          pold.QtyInvcd AS quantityInvoiced,
+          pold.QtyOpenToRcv AS quantityOpenToReceive,
+          pold.QtyRtrnCredit AS quantityReturnedForCredit,
+          pold.QtyRtrnReplacement AS quantityReturnedForReplacement,
+          pold.GLAcctKey AS glAccountKey,
+
+          CASE
+              WHEN d.UnitCost IS NOT NULL AND d.UnitCost <> 0 THEN d.ExtAmt / d.UnitCost
+              ELSE NULL
+          END AS calculatedInvoiceQuantity
+
+      FROM dbo.tapVoucherDetl d
+      LEFT JOIN dbo.tpoPOLineDist pold
+          ON pold.POLineKey = d.POLineKey
+      WHERE d.VoucherKey IN (${voucherKeyParams.join(', ')})
+      ORDER BY d.VoucherKey, d.SeqNo, d.VoucherLineKey;
+    `);
+
+    // ============================
+    // STEP 3: Group lines by VoucherKey
+    // ============================
+    const linesByVoucherKey = new Map();
+
+    for (const line of lineResult.recordset) {
+      if (!linesByVoucherKey.has(line.voucherKey)) {
+        linesByVoucherKey.set(line.voucherKey, []);
+      }
+
+      const { voucherKey, ...lineData } = line;
+      linesByVoucherKey.get(voucherKey).push(lineData);
+    }
+
+    const data = invoices.map(inv => ({
+      ...inv,
+      lines: linesByVoucherKey.get(inv.voucherKey) || []
+    }));
+
+    return res.json({
+      page,
+      pageSize,
+      count: data.length,
+      data
+    });
+
+  } catch (err) {
+    console.error('Invoices with lines query failed:', err);
+
+    return res.status(500).json({
+      error: 'QUERY_FAILED',
+      message: err.message
+    });
+  }
+});
+
+app.get('/invoice-lines', async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '100', 10), 1), 500);
+    const offset = (page - 1) * pageSize;
+
+    const updatedSince = req.query.updatedSince || null;
+    const voucherKey = req.query.voucherKey ? parseInt(req.query.voucherKey, 10) : null;
+    const invoiceNumber = req.query.invoiceNumber || null;
+
+    if (req.query.voucherKey && Number.isNaN(voucherKey)) {
+      return res.status(400).json({
+        error: 'VALIDATION_FAILED',
+        message: 'voucherKey must be a valid integer'
+      });
+    }
+
+    const request = pool.request()
+      .input('updatedSince', updatedSince)
+      .input('voucherKey', voucherKey)
+      .input('invoiceNumber', invoiceNumber)
+      .input('offset', offset)
+      .input('pageSize', pageSize);
+
+    const result = await request.query(`
+      SELECT
+          d.VoucherKey AS voucherKey,
+          inv.TranID AS invoiceNumber,
+          inv.TranDate AS invoiceDate,
+          inv.DueDate AS dueDate,
+          inv.CompanyID AS companyId,
+
+          inv.VendKey AS vendKey,
+          v.VendID AS vendorId,
+          v.VendName AS vendorName,
+
+          d.VoucherLineKey AS voucherLineKey,
+          d.SeqNo AS lineNumber,
+          d.POLineKey AS poLineKey,
+          d.RcvrLineKey AS rcvrLineKey,
+          d.ItemKey AS itemKey,
+          d.Description AS description,
+          d.ExtCmnt AS extendedComment,
+          d.UnitCost AS unitCost,
+          d.UnitCostExact AS unitCostExact,
+          d.UnitMeasKey AS unitMeasKey,
+          d.ExtAmt AS lineAmount,
+          d.STaxClassKey AS sTaxClassKey,
+          d.MatchStatus AS matchStatus,
+          d.ReturnType AS returnType,
+          d.TargetCompanyID AS targetCompanyId,
+
+          pold.QtyOrd AS quantityOrdered,
+          pold.QtyRcvd AS quantityReceived,
+          pold.QtyInvcd AS quantityInvoiced,
+          pold.QtyOpenToRcv AS quantityOpenToReceive,
+          pold.QtyRtrnCredit AS quantityReturnedForCredit,
+          pold.QtyRtrnReplacement AS quantityReturnedForReplacement,
+          pold.GLAcctKey AS glAccountKey,
+
+          CASE
+              WHEN d.UnitCost IS NOT NULL AND d.UnitCost <> 0 THEN d.ExtAmt / d.UnitCost
+              ELSE NULL
+          END AS calculatedInvoiceQuantity
+
+      FROM dbo.tapVoucherDetl d
+      INNER JOIN dbo.tapVoucher inv
+          ON d.VoucherKey = inv.VoucherKey
+      INNER JOIN dbo.tapVendor v
+          ON inv.VendKey = v.VendKey
+      LEFT JOIN dbo.tpoPOLineDist pold
+          ON pold.POLineKey = d.POLineKey
+
+      WHERE
+          inv.Balance <> 0
+          AND (@updatedSince IS NULL OR inv.UpdateDate >= @updatedSince)
+          AND (@voucherKey IS NULL OR d.VoucherKey = @voucherKey)
+          AND (@invoiceNumber IS NULL OR inv.TranID = @invoiceNumber)
+
+      ORDER BY inv.UpdateDate DESC, d.VoucherKey, d.SeqNo, d.VoucherLineKey
+
+      OFFSET @offset ROWS
+      FETCH NEXT @pageSize ROWS ONLY;
+    `);
+
+    return res.json({
+      page,
+      pageSize,
+      count: result.recordset.length,
+      data: result.recordset
+    });
+
+  } catch (err) {
+    console.error('Invoice lines query failed:', err);
+
+    return res.status(500).json({
+      error: 'QUERY_FAILED',
+      message: err.message
+    });
+  }
+});
+
 app.get('/gl-accounts', async (req, res) => {
   try {
     const result = await pool.request().query(`
