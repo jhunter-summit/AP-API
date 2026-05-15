@@ -45,7 +45,7 @@ info:
 
     '
 servers:
-- url: http://localhost:3000
+- url: https://sicxyz001.summitinterconnect.com/
   description: Local testing endpoint
 security:
 - ApiKeyAuth: []
