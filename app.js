@@ -130,6 +130,10 @@ function validateQuadientInvoice(payload) {
       if (line.poLineKey == null) {
         errors.push(`lines[${index}].poLineKey is required`);
       }
+
+      if (line.glAccountKey == null) {
+        errors.push(`lines[${index}].glAccountKey is required`);
+      }
     });
   }
 
@@ -163,8 +167,8 @@ const swaggerDocument = YAML.load('./swagger/openapi.yaml');
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 function apiKeyAuth(req, res, next) {
-  console.log('--- API KEY AUTH START ---');
-  console.log('REQUIRE_API_KEY:', process.env.REQUIRE_API_KEY);
+  // console.log('--- API KEY AUTH START ---');
+  // console.log('REQUIRE_API_KEY:', process.env.REQUIRE_API_KEY);
 
   if (process.env.REQUIRE_API_KEY !== 'true') {
     console.log('API key not required. Continuing.');
@@ -195,6 +199,12 @@ function apiKeyAuth(req, res, next) {
   return next();
 }
 app.use(apiKeyAuth);
+
+function cleanString(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text.length === 0 ? null : text;
+}
 
 app.get('/db-test', async (req, res) => {
     try {
@@ -239,9 +249,9 @@ app.get('/vendors', async (req, res) => {
   try {
     const result = await pool.request().query(`
       SELECT TOP 50
-        VendID AS vendorId,
+        LTRIM(RTRIM(VendID)) AS vendorId,
         VendKey AS vendorKey,
-        VendName AS vendorName
+        LTRIM(RTRIM(VendName)) AS vendorName
       FROM dbo.tapVendor
       ORDER BY VendName
     `);
@@ -275,8 +285,8 @@ app.get('/invoices', async (req, res) => {
     const result = await request.query(`
       SELECT
         inv.VoucherKey AS voucherKey,
-        inv.CompanyID AS companyId,
-        inv.TranID AS invoiceNumber,
+        LTRIM(RTRIM(inv.CompanyID)) AS companyId,
+        LTRIM(RTRIM(inv.TranID)) AS invoiceNumber,
         inv.TranDate AS invoiceDate,
         inv.PostDate AS postDate,
         inv.InvcRcptDate AS invoiceReceiptDate,
@@ -286,15 +296,16 @@ app.get('/invoices', async (req, res) => {
         inv.Balance AS balance,
         inv.Status AS statusCode,
         CASE inv.Status
-            WHEN 1 THEN 'Open'
-            WHEN 2 THEN 'Closed'
+            WHEN 2 THEN 'Open'
+            WHEN 1 THEN 'Closed'
             ELSE 'Unknown'
         END AS status,
-        inv.TranCmnt AS invoiceDescription,
+        LTRIM(RTRIM(inv.TranCmnt)) AS invoiceDescription,
         inv.CreateDate AS createdAt,
         inv.UpdateDate AS updatedAt,
-        v.VendID AS vendorId,
-        v.VendName AS vendorName
+        inv.VendKey AS vendKey,
+        LTRIM(RTRIM(v.VendID)) AS vendorId,
+        LTRIM(RTRIM(v.VendName)) AS vendorName
       FROM dbo.tapVoucher inv
       INNER JOIN dbo.tapVendor v
         ON inv.VendKey = v.VendKey
@@ -331,38 +342,45 @@ app.get('/invoices-with-lines', async (req, res) => {
 
     const updatedSince = req.query.updatedSince || null;
 
+    if (updatedSince && Number.isNaN(Date.parse(updatedSince))) {
+      return res.status(400).json({
+        error: 'VALIDATION_FAILED',
+        message: 'updatedSince must be a valid date or date-time value'
+      });
+    }
+
     // ============================
     // STEP 1: Page invoice headers
     // ============================
     const headerRequest = pool.request()
-      .input('updatedSince', updatedSince)
-      .input('offset', offset)
-      .input('pageSize', pageSize);
+      .input('updatedSince', sql.DateTime, updatedSince)
+      .input('offset', sql.Int, offset)
+      .input('pageSize', sql.Int, pageSize);
 
     const headerResult = await headerRequest.query(`
       SELECT
-          inv.VoucherKey AS voucherKey,
-          inv.CompanyID AS companyId,
-          inv.TranID AS invoiceNumber,
-          inv.TranDate AS invoiceDate,
-          inv.PostDate AS postDate,
-          inv.InvcRcptDate AS invoiceReceiptDate,
-          inv.DueDate AS dueDate,
-          inv.TranAmt AS invoiceAmount,
-          inv.PurchAmt AS purchaseAmount,
-          inv.Balance AS balance,
-          inv.Status AS statusCode,
-          CASE inv.Status
-              WHEN 2 THEN 'Open'
-              WHEN 1 THEN 'Closed'
-              ELSE 'Unknown'
-          END AS status,
-          inv.TranCmnt AS invoiceDescription,
-          inv.CreateDate AS createdAt,
-          inv.UpdateDate AS updatedAt,
-          inv.VendKey AS vendKey,
-          v.VendID AS vendorId,
-          v.VendName AS vendorName
+        inv.VoucherKey AS voucherKey,
+        LTRIM(RTRIM(inv.CompanyID)) AS companyId,
+        LTRIM(RTRIM(inv.TranID)) AS invoiceNumber,
+        inv.TranDate AS invoiceDate,
+        inv.PostDate AS postDate,
+        inv.InvcRcptDate AS invoiceReceiptDate,
+        inv.DueDate AS dueDate,
+        inv.TranAmt AS invoiceAmount,
+        inv.PurchAmt AS purchaseAmount,
+        inv.Balance AS balance,
+        inv.Status AS statusCode,
+        CASE inv.Status
+            WHEN 2 THEN 'Open'
+            WHEN 1 THEN 'Closed'
+            ELSE 'Unknown'
+        END AS status,
+        LTRIM(RTRIM(inv.TranCmnt)) AS invoiceDescription,
+        inv.CreateDate AS createdAt,
+        inv.UpdateDate AS updatedAt,
+        inv.VendKey AS vendKey,
+        LTRIM(RTRIM(v.VendID)) AS vendorId,
+        LTRIM(RTRIM(v.VendName)) AS vendorName
       FROM dbo.tapVoucher inv
       INNER JOIN dbo.tapVendor v
           ON inv.VendKey = v.VendKey
@@ -394,7 +412,7 @@ app.get('/invoices-with-lines', async (req, res) => {
 
     const voucherKeyParams = voucherKeys.map((voucherKey, index) => {
       const paramName = `voucherKey${index}`;
-      lineRequest.input(paramName, voucherKey);
+      lineRequest.input(paramName, sql.Int, voucherKey);
       return `@${paramName}`;
     });
 
@@ -406,8 +424,8 @@ app.get('/invoices-with-lines', async (req, res) => {
           d.POLineKey AS poLineKey,
           d.RcvrLineKey AS rcvrLineKey,
           d.ItemKey AS itemKey,
-          d.Description AS description,
-          d.ExtCmnt AS extendedComment,
+          LTRIM(RTRIM(d.Description)) AS description,
+          LTRIM(RTRIM(d.ExtCmnt)) AS extendedComment,
           d.UnitCost AS unitCost,
           d.UnitCostExact AS unitCostExact,
           d.UnitMeasKey AS unitMeasKey,
@@ -415,7 +433,14 @@ app.get('/invoices-with-lines', async (req, res) => {
           d.STaxClassKey AS sTaxClassKey,
           d.MatchStatus AS matchStatus,
           d.ReturnType AS returnType,
-          d.TargetCompanyID AS targetCompanyId,
+          LTRIM(RTRIM(d.TargetCompanyID)) AS targetCompanyId,
+
+          po.POKey AS poKey,
+          LTRIM(RTRIM(po.TranID)) AS poNumber,
+
+          rl.RcvrKey AS receiptKey,
+          LTRIM(RTRIM(r.TranID)) AS receiptNumber,
+          r.TranDate AS receiptDate,
 
           pold.QtyOrd AS quantityOrdered,
           pold.QtyRcvd AS quantityReceived,
@@ -425,14 +450,34 @@ app.get('/invoices-with-lines', async (req, res) => {
           pold.QtyRtrnReplacement AS quantityReturnedForReplacement,
           pold.GLAcctKey AS glAccountKey,
 
+          LTRIM(RTRIM(gl.GLAcctNo)) AS glAccountNumber,
+          LTRIM(RTRIM(gl.Description)) AS glAccountDescription,
+
           CASE
               WHEN d.UnitCost IS NOT NULL AND d.UnitCost <> 0 THEN d.ExtAmt / d.UnitCost
               ELSE NULL
           END AS calculatedInvoiceQuantity
 
       FROM dbo.tapVoucherDetl d
+
+      LEFT JOIN dbo.tpoPOLine pol
+          ON pol.POLineKey = d.POLineKey
+
+      LEFT JOIN dbo.tpoPurchOrder po
+          ON po.POKey = pol.POKey
+
+      LEFT JOIN dbo.tpoRcvrLine rl
+          ON rl.RcvrLineKey = d.RcvrLineKey
+
+      LEFT JOIN dbo.tpoReceiver r
+          ON r.RcvrKey = rl.RcvrKey
+
       LEFT JOIN dbo.tpoPOLineDist pold
           ON pold.POLineKey = d.POLineKey
+
+      LEFT JOIN dbo.tglAccount gl
+          ON gl.GLAcctKey = pold.GLAcctKey
+
       WHERE d.VoucherKey IN (${voucherKeyParams.join(', ')})
       ORDER BY d.VoucherKey, d.SeqNo, d.VoucherLineKey;
     `);
@@ -500,22 +545,22 @@ app.get('/invoice-lines', async (req, res) => {
     const result = await request.query(`
       SELECT
           d.VoucherKey AS voucherKey,
-          inv.TranID AS invoiceNumber,
+          LTRIM(RTRIM(inv.TranID)) AS invoiceNumber,
           inv.TranDate AS invoiceDate,
           inv.DueDate AS dueDate,
-          inv.CompanyID AS companyId,
+          LTRIM(RTRIM(inv.CompanyID)) AS companyId,
 
           inv.VendKey AS vendKey,
-          v.VendID AS vendorId,
-          v.VendName AS vendorName,
+          LTRIM(RTRIM(v.VendID)) AS vendorId,
+          LTRIM(RTRIM(v.VendName)) AS vendorName,
 
           d.VoucherLineKey AS voucherLineKey,
           d.SeqNo AS lineNumber,
           d.POLineKey AS poLineKey,
           d.RcvrLineKey AS rcvrLineKey,
           d.ItemKey AS itemKey,
-          d.Description AS description,
-          d.ExtCmnt AS extendedComment,
+          LTRIM(RTRIM(d.Description)) AS description,
+          LTRIM(RTRIM(d.ExtCmnt)) AS extendedComment,
           d.UnitCost AS unitCost,
           d.UnitCostExact AS unitCostExact,
           d.UnitMeasKey AS unitMeasKey,
@@ -523,7 +568,7 @@ app.get('/invoice-lines', async (req, res) => {
           d.STaxClassKey AS sTaxClassKey,
           d.MatchStatus AS matchStatus,
           d.ReturnType AS returnType,
-          d.TargetCompanyID AS targetCompanyId,
+          LTRIM(RTRIM(d.TargetCompanyID)) AS targetCompanyId,
 
           pold.QtyOrd AS quantityOrdered,
           pold.QtyRcvd AS quantityReceived,
@@ -532,6 +577,8 @@ app.get('/invoice-lines', async (req, res) => {
           pold.QtyRtrnCredit AS quantityReturnedForCredit,
           pold.QtyRtrnReplacement AS quantityReturnedForReplacement,
           pold.GLAcctKey AS glAccountKey,
+          LTRIM(RTRIM(gl.GLAcctNo)) AS glAccountNumber,
+          LTRIM(RTRIM(gl.Description)) AS glAccountDescription,
 
           CASE
               WHEN d.UnitCost IS NOT NULL AND d.UnitCost <> 0 THEN d.ExtAmt / d.UnitCost
@@ -539,12 +586,15 @@ app.get('/invoice-lines', async (req, res) => {
           END AS calculatedInvoiceQuantity
 
       FROM dbo.tapVoucherDetl d
-      INNER JOIN dbo.tapVoucher inv
-          ON d.VoucherKey = inv.VoucherKey
-      INNER JOIN dbo.tapVendor v
-          ON inv.VendKey = v.VendKey
-      LEFT JOIN dbo.tpoPOLineDist pold
-          ON pold.POLineKey = d.POLineKey
+        INNER JOIN dbo.tapVoucher inv
+            ON d.VoucherKey = inv.VoucherKey
+        INNER JOIN dbo.tapVendor v
+            ON inv.VendKey = v.VendKey
+        LEFT JOIN dbo.tpoPOLineDist pold
+            ON pold.POLineKey = d.POLineKey
+        LEFT JOIN dbo.tglAccount gl
+            ON gl.GLAcctKey = pold.GLAcctKey
+      
 
       WHERE
           inv.Balance <> 0
@@ -577,19 +627,80 @@ app.get('/invoice-lines', async (req, res) => {
 
 app.get('/gl-accounts', async (req, res) => {
   try {
-    const result = await pool.request().query(`
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '100', 10), 1), 500);
+
+    const startRow = ((page - 1) * pageSize) + 1;
+    const endRow = page * pageSize;
+
+    const updatedSince = req.query.updatedSince || null;
+
+    const request = pool.request()
+      .input('updatedSince', sql.DateTime, updatedSince)
+      .input('startRow', sql.Int, startRow)
+      .input('endRow', sql.Int, endRow);
+
+    const result = await request.query(`
+      WITH CurrentActiveAccounts AS (
+          SELECT
+              ga.GLAcctKey,
+              ga.GLAcctNo,
+              ga.Description,
+              ga.Status,
+              ga.UpdateDate
+          FROM dbo.tglAccount ga
+          WHERE
+              ga.Status = 1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM dbo.tglAccount newer
+                  WHERE
+                      newer.GLAcctNo = ga.GLAcctNo
+                      AND (
+                          newer.UpdateDate > ga.UpdateDate
+                          OR (
+                              newer.UpdateDate = ga.UpdateDate
+                              AND newer.GLAcctKey > ga.GLAcctKey
+                          )
+                      )
+              )
+              AND (@updatedSince IS NULL OR ga.UpdateDate >= @updatedSince)
+      ),
+      PagedAccounts AS (
+          SELECT
+              ROW_NUMBER() OVER (ORDER BY GLAcctNo) AS rowNum,
+              GLAcctKey,
+              GLAcctNo,
+              Description,
+              Status,
+              UpdateDate
+          FROM CurrentActiveAccounts
+      )
       SELECT
-        GLAcctNo AS accountNumber,
-        Description AS description,
-        CASE WHEN Status = 1 THEN 1 ELSE 0 END AS active
-      FROM dbo.tglAccount
-      ORDER BY GLAcctNo
+          GLAcctKey AS glAccountKey,
+          LTRIM(RTRIM(GLAcctNo)) AS glAccountNumber,
+          LTRIM(RTRIM(Description)) AS glAccountDescription,
+          Status AS status,
+          UpdateDate AS updatedAt
+      FROM PagedAccounts
+      WHERE rowNum BETWEEN @startRow AND @endRow
+      ORDER BY rowNum;
     `);
 
-    res.json({ data: result.recordset });
+    return res.json({
+      page,
+      pageSize,
+      count: result.recordset.length,
+      data: result.recordset
+    });
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'QUERY_FAILED', message: err.message });
+    console.error('GL accounts query failed:', err);
+
+    return res.status(500).json({
+      error: 'QUERY_FAILED',
+      message: err.message
+    });
   }
 });
 
@@ -762,9 +873,9 @@ app.get('/customers', async (req, res) => {
   try {
     const result = await pool.request().query(`
       SELECT
-        CustID AS customerId,
-        CustName AS customerName,
-        CompanyID AS companyId
+        LTRIM(RTRIM(CustID)) AS customerId,
+        LTRIM(RTRIM(CustName)) AS customerName,
+        LTRIM(RTRIM(CompanyID)) AS companyId
       FROM dbo.tarCustomer
       ORDER BY CustName
     `);
@@ -870,15 +981,15 @@ app.post('/quadient/invoice', async (req, res) => {
       const headerRequest = new sql.Request(transaction);
 
       const headerResult = await headerRequest
-        .input('invoiceNumber', sql.NVarChar(50), payload.invoiceNumber)
+        .input('invoiceNumber', sql.NVarChar(50), cleanString(payload.invoiceNumber))
         .input('vendKey', sql.Int, payload.vendorKey ?? null)
-        .input('vendorId', sql.NVarChar(50), payload.vendorId || null)
-        .input('companyId', sql.NVarChar(20), payload.companyId || null)
+        .input('vendorId', sql.NVarChar(50), cleanString(payload.vendorId))
+        .input('companyId', sql.NVarChar(20), cleanString(payload.companyId))
         .input('invoiceDate', sql.Date, payload.invoiceDate)
         .input('dueDate', sql.Date, payload.dueDate)
-        .input('memo', sql.NVarChar(sql.MAX), payload.memo || null)
-        .input('beanworksInvoiceUrl', sql.NVarChar(500), payload.beanworksInvoiceUrl || null)
-        .input('currency', sql.NVarChar(10), payload.currency || null)
+        .input('memo', sql.NVarChar(sql.MAX), cleanString(payload.memo))
+        .input('beanworksInvoiceUrl', sql.NVarChar(500), cleanString(payload.beanworksInvoiceUrl))
+        .input('currency', sql.NVarChar(10), cleanString(payload.currency))
         .input('totalAmount', sql.Decimal(19, 4), payload.totalAmount)
         .input('rawPayload', sql.NVarChar(sql.MAX), JSON.stringify(payload))
         .query(`
@@ -922,21 +1033,28 @@ app.post('/quadient/invoice', async (req, res) => {
           .input('stagingId', sql.Int, stagingId)
           .input('lineNumber', sql.Int, line.lineNumber ?? null)
           .input('itemKey', sql.Int, line.itemKey ?? null)
-          .input('itemId', sql.NVarChar(100), line.itemId || null)
+          .input('itemId', sql.NVarChar(100), cleanString(line.itemId))
           .input('unitCost', sql.Decimal(19, 4), line.unitCost)
           .input('quantity', sql.Decimal(19, 4), line.quantity)
-          .input('unitMeasure', sql.NVarChar(20), line.unitMeasure || null)
-          .input('unitMeasKey', sql.Int, line.unitMeasKey ?? null)
+          .input('unitMeasure', sql.NVarChar(20), cleanString(line.unitMeasure))
+          //.input('unitMeasKey', sql.Int, line.unitMeasKey ?? null)
           .input('lineAmount', sql.Decimal(19, 4), line.lineAmount)
           .input('poKey', sql.Int, line.poKey ?? null)
-          .input('poNumber', sql.NVarChar(50), line.poNumber || null)
+          .input('poNumber', sql.NVarChar(50), cleanString(line.poNumber))
           .input('poLineKey', sql.Int, line.poLineKey)
           .input('poLineNumber', sql.Int, line.poLineNumber ?? null)
           .input('rcvrLineKey', sql.Int, line.rcvrLineKey)
-          .input('description', sql.NVarChar(sql.MAX), line.description || null)
+          .input('description', sql.NVarChar(sql.MAX), cleanString(line.description))
           .input('sTaxClassKey', sql.Int, line.sTaxClassKey ?? null)
-          .input('department', sql.NVarChar(50), line.department || null)
-          .input('costCenter', sql.NVarChar(50), line.costCenter || null)
+          .input('department', sql.NVarChar(50), cleanString(line.department))
+          .input('costCenter', sql.NVarChar(50), cleanString(line.costCenter))
+          .input('glAccountKey', sql.Int, line.glAccountKey ?? null)
+          .input('quantityOrdered', sql.Decimal(19, 4), line.quantityOrdered ?? null)
+          .input('quantityReceived', sql.Decimal(19, 4), line.quantityReceived ?? null)
+          .input('quantityInvoiced', sql.Decimal(19, 4), line.quantityInvoiced ?? null)
+          .input('quantityOpenToReceive', sql.Decimal(19, 4), line.quantityOpenToReceive ?? null)
+          .input('quantityReturnedForCredit', sql.Decimal(19, 4), line.quantityReturnedForCredit ?? null)
+          .input('quantityReturnedForReplacement', sql.Decimal(19, 4), line.quantityReturnedForReplacement ?? null)
           .query(`
             INSERT INTO dbo.QuadientInvoiceLineStaging (
                 QuadientInvoiceStagingID,
@@ -946,7 +1064,6 @@ app.post('/quadient/invoice', async (req, res) => {
                 UnitCost,
                 Quantity,
                 UnitMeasure,
-                UnitMeasKey,
                 LineAmount,
                 POKey,
                 PONumber,
@@ -956,7 +1073,14 @@ app.post('/quadient/invoice', async (req, res) => {
                 Description,
                 STaxClassKey,
                 Department,
-                CostCenter
+                CostCenter,
+                GLAcctKey,
+                QuantityOrdered,
+                QuantityReceived,
+                QuantityInvoiced,
+                QuantityOpenToReceive,
+                QuantityReturnedForCredit,
+                QuantityReturnedForReplacement
             )
             VALUES (
                 @stagingId,
@@ -966,7 +1090,6 @@ app.post('/quadient/invoice', async (req, res) => {
                 @unitCost,
                 @quantity,
                 @unitMeasure,
-                @unitMeasKey,
                 @lineAmount,
                 @poKey,
                 @poNumber,
@@ -976,7 +1099,14 @@ app.post('/quadient/invoice', async (req, res) => {
                 @description,
                 @sTaxClassKey,
                 @department,
-                @costCenter
+                @costCenter,
+                @glAccountKey,
+                @quantityOrdered,
+                @quantityReceived,
+                @quantityInvoiced,
+                @quantityOpenToReceive,
+                @quantityReturnedForCredit,
+                @quantityReturnedForReplacement
             );
           `);
       }
