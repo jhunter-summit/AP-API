@@ -408,10 +408,17 @@ paths:
   /quadient/invoice:
     post:
       summary: Receive one invoice from Quadient Beanworks
-      description: 'Receives one 3-way matched invoice per request from Quadient Beanworks and stores it in staging tables for Sage 500 Data Import Manager processing.
+      description: >
+        Receives one invoice per request from Quadient Beanworks and stores it
+        in staging tables for Sage 500 Data Import Manager processing. This
+        endpoint does not write directly to Sage voucher tables.
 
+        For PO_MATCHED invoices, each line must include unitCost, quantity,
+        lineAmount, poLineKey, rcvrLineKey, and glAccountKey.
 
-        This endpoint does not write directly to Sage 500 voucher tables. After staging, Net@Work / Sage DIM can import from the DIM-facing views and then update the staging status.'
+        For TWO_WAY invoices, each line must include lineAmount, glAccountKey,
+        and description. PO and receiver line keys are not required for TWO_WAY
+        invoices.
       tags:
       - Quadient Inbound
       requestBody:
@@ -420,35 +427,98 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/QuadientInvoiceRequest'
-            example:
-              invoiceNumber: TEST-BEAN-1001
-              vendorKey: 123
-              vendorId: TESTVENDOR
-              invoiceDate: '2026-05-07'
-              dueDate: '2026-06-06'
-              memo: Test invoice from Quadient API endpoint
-              beanworksInvoiceUrl: https://example.com/beanworks/invoice/TEST-BEAN-1001
-              currency: USD
-              companyId: '001'
-              totalAmount: 125.0
-              lines:
-              - lineNumber: 1
-                itemKey: 456
-                itemId: TESTITEM
-                unitCost: 12.5
-                quantity: 10
-                unitMeasure: EA
-                unitMeasKey: 1
-                lineAmount: 125.0
-                poKey: 10001
-                poNumber: PO-TEST-001
-                poLineKey: 20001
-                poLineNumber: 1
-                rcvrLineKey: 30001
-                description: Test invoice line
-                sTaxClassKey: null
-                department: TEST
-                costCenter: TEST
+            examples:
+              poMatchedInvoice:
+                summary: PO matched / 3-way invoice
+                value:
+                  invoiceType: "PO_MATCHED"
+                  invoiceNumber: "TEST-PO-1001"
+                  vendorKey: 12345
+                  vendorId: "TESTVENDOR"
+                  invoiceDate: "2026-05-18"
+                  dueDate: "2026-06-17"
+                  memo: "Test PO-matched invoice from Quadient"
+                  beanworksInvoiceUrl: "https://example.com/beanworks/invoices/TEST-PO-1001"
+                  currency: "USD"
+                  companyId: "001"
+                  totalAmount: 250.00
+                  lines:
+                    - lineNumber: 1
+                      itemKey: 1001
+                      itemId: "TESTITEM-001"
+                      unitCost: 25.00
+                      quantity: 4
+                      unitMeasure: "EA"
+                      lineAmount: 100.00
+                      poKey: 50001
+                      poNumber: "PO-TEST-001"
+                      poLineKey: 60001
+                      poLineNumber: 1
+                      rcvrLineKey: 70001
+                      description: "PO-matched invoice line 1"
+                      sTaxClassKey: null
+                      department: "TEST"
+                      costCenter: "TEST"
+                      glAccountKey: 80001
+                      quantityOrdered: 4
+                      quantityReceived: 4
+                      quantityInvoiced: 4
+                      quantityOpenToReceive: 0
+                      quantityReturnedForCredit: 0
+                      quantityReturnedForReplacement: 0
+                    - lineNumber: 2
+                      itemKey: 1002
+                      itemId: "TESTITEM-002"
+                      unitCost: 75.00
+                      quantity: 2
+                      unitMeasure: "EA"
+                      lineAmount: 150.00
+                      poKey: 50001
+                      poNumber: "PO-TEST-001"
+                      poLineKey: 60002
+                      poLineNumber: 2
+                      rcvrLineKey: 70002
+                      description: "PO-matched invoice line 2"
+                      sTaxClassKey: null
+                      department: "TEST"
+                      costCenter: "TEST"
+                      glAccountKey: 80001
+                      quantityOrdered: 2
+                      quantityReceived: 2
+                      quantityInvoiced: 2
+                      quantityOpenToReceive: 0
+                      quantityReturnedForCredit: 0
+                      quantityReturnedForReplacement: 0
+
+              twoWayInvoice:
+                summary: 2-way / non-PO invoice
+                value:
+                  invoiceType: "TWO_WAY"
+                  invoiceNumber: "TEST-2WAY-1001"
+                  vendorKey: 12345
+                  vendorId: "TESTVENDOR"
+                  invoiceDate: "2026-05-18"
+                  dueDate: "2026-06-17"
+                  memo: "Test 2-way invoice from Quadient"
+                  beanworksInvoiceUrl: "https://example.com/beanworks/invoices/TEST-2WAY-1001"
+                  currency: "USD"
+                  companyId: "001"
+                  totalAmount: 250.00
+                  lines:
+                    - lineNumber: 1
+                      description: "2-way invoice expense line 1"
+                      lineAmount: 100.00
+                      glAccountKey: 80001
+                      sTaxClassKey: null
+                      department: "TEST"
+                      costCenter: "TEST"
+                    - lineNumber: 2
+                      description: "2-way invoice expense line 2"
+                      lineAmount: 150.00
+                      glAccountKey: 80001
+                      sTaxClassKey: null
+                      department: "TEST"
+                      costCenter: "TEST"
       responses:
         '201':
           description: Invoice received and staged for DIM import
