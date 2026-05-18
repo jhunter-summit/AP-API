@@ -945,6 +945,15 @@ components:
           type: string
           maxLength: 50
           example: INV-12345
+        invoiceType:
+          type: string
+          description: >
+            Invoice processing type. PO_MATCHED is used for 3-way PO/receipt matched invoices.
+            TWO_WAY is used for non-PO / 2-way invoices. If omitted, the API treats the invoice as PO_MATCHED.
+          enum:
+            - PO_MATCHED
+            - TWO_WAY
+          example: "PO_MATCHED"
         vendorKey:
           type: integer
           nullable: true
@@ -994,14 +1003,19 @@ components:
             $ref: '#/components/schemas/QuadientInvoiceLineRequest'
       description: One invoice per POST request. Either vendorKey or vendorId must be supplied; vendorKey is preferred for Sage/DIM processing.
     QuadientInvoiceLineRequest:
+      oneOf:
+        - $ref: '#/components/schemas/QuadientPoMatchedInvoiceLineRequest'
+        - $ref: '#/components/schemas/QuadientTwoWayInvoiceLineRequest'
+
+    QuadientPoMatchedInvoiceLineRequest:
       type: object
       required:
-      - unitCost
-      - quantity
-      - lineAmount
-      - poLineKey
-      - rcvrLineKey
-      - glAccountKey
+        - unitCost
+        - quantity
+        - lineAmount
+        - poLineKey
+        - rcvrLineKey
+        - glAccountKey
       properties:
         lineNumber:
           type: integer
@@ -1014,39 +1028,31 @@ components:
         itemId:
           type: string
           nullable: true
-          maxLength: 100
-          example: LAM-PACO-2
+          example: "TESTITEM"
         unitCost:
           type: number
-          format: double
+          format: decimal
           example: 12.5
         quantity:
           type: number
-          format: double
+          format: decimal
           example: 10
         unitMeasure:
           type: string
           nullable: true
-          maxLength: 20
-          example: EA
-        unitMeasKey:
-          type: integer
-          nullable: true
-          example: 1
+          example: "EA"
         lineAmount:
           type: number
-          format: double
-          example: 125.0
+          format: decimal
+          example: 125
         poKey:
           type: integer
           nullable: true
-          description: Sage 500 tpoPurchOrder.POKey.
           example: 10001
         poNumber:
           type: string
           nullable: true
-          maxLength: 50
-          example: 00007195
+          example: "PO-TEST-001"
         poLineKey:
           type: integer
           description: Sage 500 tpoPOLine.POLineKey.
@@ -1062,26 +1068,23 @@ components:
         description:
           type: string
           nullable: true
-          example: Invoice line description
+          example: "Test PO-matched invoice line"
         sTaxClassKey:
           type: integer
           nullable: true
-          description: Sage 500 tciSTaxClass.STaxClassKey when applicable.
           example: null
         department:
           type: string
           nullable: true
-          maxLength: 50
-          example: OPS
+          example: "TEST"
         costCenter:
           type: string
           nullable: true
-          maxLength: 50
-          example: '100'
+          example: "TEST"
         glAccountKey:
           type: integer
           description: Sage 500 G/L account key for this invoice line.
-          example: 12345
+          example: 80001
         quantityOrdered:
           type: number
           nullable: true
@@ -1106,6 +1109,64 @@ components:
           type: number
           nullable: true
           example: 0
+
+    QuadientTwoWayInvoiceLineRequest:
+      type: object
+      required:
+        - lineAmount
+        - glAccountKey
+        - description
+      properties:
+        lineNumber:
+          type: integer
+          nullable: true
+          example: 1
+        description:
+          type: string
+          description: Description is required for TWO_WAY invoice lines.
+          example: "2-way invoice expense line"
+        lineAmount:
+          type: number
+          format: decimal
+          example: 125
+        glAccountKey:
+          type: integer
+          description: Sage 500 G/L account key for this invoice line.
+          example: 80001
+        sTaxClassKey:
+          type: integer
+          nullable: true
+          example: null
+        department:
+          type: string
+          nullable: true
+          example: "TEST"
+        costCenter:
+          type: string
+          nullable: true
+          example: "TEST"
+        itemKey:
+          type: integer
+          nullable: true
+          example: null
+        itemId:
+          type: string
+          nullable: true
+          example: null
+        unitCost:
+          type: number
+          nullable: true
+          description: Optional for TWO_WAY invoices.
+          example: null
+        quantity:
+          type: number
+          nullable: true
+          description: Optional for TWO_WAY invoices.
+          example: null
+        unitMeasure:
+          type: string
+          nullable: true
+          example: null    
     QuadientInvoiceResponse:
       type: object
       properties:
@@ -1286,6 +1347,14 @@ components:
           nullable: true
           description: Sage G/L account key from tpoPOLineDist.GLAcctKey.
           example: 12345
+                glAccountNumber:
+          type: string
+          nullable: true
+          example: "5000-100-200"
+        glAccountDescription:
+          type: string
+          nullable: true
+          example: "Raw Materials Expense"
         calculatedInvoiceQuantity: &id023
           type: number
           nullable: true
