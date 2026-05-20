@@ -225,7 +225,7 @@ app.get('/db-test', async (req, res) => {
 app.get('/companies', async (req, res) => {
     try {
         const result = await pool.request().query(`
-            SELECT TOP 10 *
+            SELECT *
             FROM dbo.tciCompany
         `);
 
@@ -247,21 +247,42 @@ app.listen(port, async () => {
 
 app.get('/vendors', async (req, res) => {
   try {
-    const result = await pool.request().query(`
-      SELECT TOP 50
-        LTRIM(RTRIM(VendID)) AS vendorId,
-        VendKey AS vendorKey,
-        LTRIM(RTRIM(VendName)) AS vendorName
+    const { page, pageSize, offset } = getPaging(req.query);
+    const updatedSince = req.query.updatedSince || null;
+
+    const request = pool.request()
+      .input('updatedSince', sql.DateTime, updatedSince)
+      .input('offset', sql.Int, offset)
+      .input('pageSize', sql.Int, pageSize);
+
+    const result = await request.query(`
+      SELECT
+          VendKey AS vendorKey,
+          LTRIM(RTRIM(VendID)) AS vendorId,
+          LTRIM(RTRIM(VendName)) AS vendorName,
+          LTRIM(RTRIM(CompanyID)) AS companyId,
+          UpdateDate AS updatedAt
       FROM dbo.tapVendor
-      ORDER BY VendName
+      WHERE
+          (@updatedSince IS NULL OR UpdateDate >= @updatedSince)
+      ORDER BY VendName, VendID
+      OFFSET @offset ROWS
+      FETCH NEXT @pageSize ROWS ONLY;
     `);
 
     res.json({
+      page,
+      pageSize,
+      count: result.recordset.length,
       data: result.recordset
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    console.error('Vendors query failed:', err);
+
+    res.status(500).json({
+      error: 'QUERY_FAILED',
+      message: err.message
+    });
   }
 });
 
@@ -627,11 +648,23 @@ app.get('/invoice-lines', async (req, res) => {
 
 app.get('/gl-accounts', async (req, res) => {
   try {
-    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
-    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize || '100', 10), 1), 500);
+    const requestedPageSize = parseInt(req.query.pageSize || '500', 10);
+    console.log('Requested pageSize:', requestedPageSize);
+    const pageSize = Math.min(Math.max(requestedPageSize || 500, 1), 1000);
 
-    const startRow = ((page - 1) * pageSize) + 1;
-    const endRow = page * pageSize;
+    let offset;
+
+    if (req.query.offset !== undefined) {
+      offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    } else {
+      const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+      offset = (page - 1) * pageSize;
+    }
+
+    const page = Math.floor(offset / pageSize) + 1;
+
+    const startRow = offset + 1;
+    const endRow = offset + pageSize;
 
     const updatedSince = req.query.updatedSince || null;
 
@@ -644,6 +677,7 @@ app.get('/gl-accounts', async (req, res) => {
       WITH CurrentActiveAccounts AS (
           SELECT
               ga.GLAcctKey,
+              ga.CompanyID,
               ga.GLAcctNo,
               ga.Description,
               ga.Status,
@@ -655,7 +689,8 @@ app.get('/gl-accounts', async (req, res) => {
                   SELECT 1
                   FROM dbo.tglAccount newer
                   WHERE
-                      newer.GLAcctNo = ga.GLAcctNo
+                      newer.CompanyID = ga.CompanyID
+                      AND newer.GLAcctNo = ga.GLAcctNo
                       AND (
                           newer.UpdateDate > ga.UpdateDate
                           OR (
@@ -666,10 +701,14 @@ app.get('/gl-accounts', async (req, res) => {
               )
               AND (@updatedSince IS NULL OR ga.UpdateDate >= @updatedSince)
       ),
-      PagedAccounts AS (
+      NumberedAccounts AS (
           SELECT
-              ROW_NUMBER() OVER (ORDER BY GLAcctNo) AS rowNum,
+              ROW_NUMBER() OVER (
+                  ORDER BY CompanyID, GLAcctNo, GLAcctKey
+              ) AS rowNum,
+              COUNT(*) OVER () AS totalCount,
               GLAcctKey,
+              CompanyID,
               GLAcctNo,
               Description,
               Status,
@@ -678,20 +717,33 @@ app.get('/gl-accounts', async (req, res) => {
       )
       SELECT
           GLAcctKey AS glAccountKey,
+          LTRIM(RTRIM(CompanyID)) AS companyId,
           LTRIM(RTRIM(GLAcctNo)) AS glAccountNumber,
           LTRIM(RTRIM(Description)) AS glAccountDescription,
           Status AS status,
-          UpdateDate AS updatedAt
-      FROM PagedAccounts
+          UpdateDate AS updatedAt,
+          totalCount
+      FROM NumberedAccounts
       WHERE rowNum BETWEEN @startRow AND @endRow
       ORDER BY rowNum;
     `);
 
+    const totalCount = result.recordset.length > 0
+      ? result.recordset[0].totalCount
+      : 0;
+
+    const data = result.recordset.map(row => {
+      const { totalCount, ...account } = row;
+      return account;
+    });
+
     return res.json({
       page,
       pageSize,
-      count: result.recordset.length,
-      data: result.recordset
+      count: data.length,
+      totalCount,
+      totalPages: Math.ceil(totalCount / pageSize),
+      data
     });
 
   } catch (err) {
@@ -812,8 +864,9 @@ app.get('/receipts', async (req, res) => {
     const { page, pageSize, offset } = getPaging(req.query);
 
     const request = pool.request()
-      .input('updatedSince', updatedSince);
-
+      .input('updatedSince', updatedSince)
+      .input('offset', sql.Int, offset)
+      .input('pageSize', sql.Int, pageSize);
     const result = await request.query(`
       SELECT
         rcv.RcvrKey AS receiptKey,
@@ -851,8 +904,8 @@ app.get('/receipts', async (req, res) => {
 
       ORDER BY rcv.TranDate DESC, rcv.TranID, line.SeqNo
 
-      OFFSET ${offset} ROWS
-      FETCH NEXT ${pageSize} ROWS ONLY;
+      OFFSET @offset ROWS
+      FETCH NEXT @pageSize ROWS ONLY;
     `);
 
     res.json({
@@ -871,19 +924,39 @@ app.get('/receipts', async (req, res) => {
 
 app.get('/customers', async (req, res) => {
   try {
-    const result = await pool.request().query(`
+    const { page, pageSize, offset } = getPaging(req.query);
+    const updatedSince = req.query.updatedSince || null;
+
+    const request = pool.request()
+      .input('updatedSince', sql.DateTime, updatedSince)
+      .input('offset', sql.Int, offset)
+      .input('pageSize', sql.Int, pageSize);
+
+    const result = await request.query(`
       SELECT
-        LTRIM(RTRIM(CustID)) AS customerId,
-        LTRIM(RTRIM(CustName)) AS customerName,
-        LTRIM(RTRIM(CompanyID)) AS companyId
+          CustKey AS customerKey,
+          LTRIM(RTRIM(REPLACE(REPLACE(CustID, CHAR(13), ''), CHAR(10), ''))) AS customerId,
+          LTRIM(RTRIM(REPLACE(REPLACE(CustName, CHAR(13), ' '), CHAR(10), ' '))) AS customerName,
+          LTRIM(RTRIM(CompanyID)) AS companyId,
+          UpdateDate AS updatedAt
       FROM dbo.tarCustomer
-      ORDER BY CustName
+      WHERE
+          (@updatedSince IS NULL OR UpdateDate >= @updatedSince)
+      ORDER BY CustName, CustID
+      OFFSET @offset ROWS
+      FETCH NEXT @pageSize ROWS ONLY;
     `);
 
-    res.json({ data: result.recordset });
+    res.json({
+      page,
+      pageSize,
+      count: result.recordset.length,
+      data: result.recordset
+    });
 
   } catch (err) {
-    console.error(err);
+    console.error('Customers query failed:', err);
+
     res.status(500).json({
       error: 'QUERY_FAILED',
       message: err.message
@@ -897,6 +970,8 @@ app.get('/statements', async (req, res) => {
     const { page, pageSize, offset } = getPaging(req.query);
 
     const request = pool.request()
+      .input('offset', sql.Int, offset)
+      .input('pageSize', sql.Int, pageSize)
       .input('updatedSince', updatedSince)
       .input('customerId', customerId);
 
@@ -926,8 +1001,8 @@ app.get('/statements', async (req, res) => {
 
       ORDER BY c.CustID, inv.TranDate DESC
 
-      OFFSET ${offset} ROWS
-      FETCH NEXT ${pageSize} ROWS ONLY;
+      OFFSET @offset ROWS
+      FETCH NEXT @pageSize ROWS ONLY;
     `);
 
     res.json({

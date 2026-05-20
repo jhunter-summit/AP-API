@@ -111,15 +111,87 @@ paths:
   /gl-accounts:
     get:
       summary: Get G/L account list
+      description: >
+        Returns current active Sage 500 G/L accounts. Account numbers may repeat
+        across companies/entities, so consumers should treat glAccountKey as the
+        stable unique identifier. The endpoint supports page/pageSize pagination
+        and also offset/pageSize pagination. If both page and offset are supplied,
+        offset takes priority.
       tags:
       - GL Accounts
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/UpdatedSince'
       responses:
         '200':
-          description: G/L accounts
+          description: List of current active G/L accounts
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GLAccountList'
+                type: object
+                properties:
+                  page:
+                    type: integer
+                    example: 1
+                  pageSize:
+                    type: integer
+                    example: 500
+                  offset:
+                    type: integer
+                    example: 0
+                  count:
+                    type: integer
+                    example: 500
+                  totalCount:
+                    type: integer
+                    example: 3370
+                  totalPages:
+                    type: integer
+                    example: 7
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        glAccountKey:
+                          type: integer
+                          example: 12345
+                        companyId:
+                          type: string
+                          example: "SSC"
+                        glAccountNumber:
+                          type: string
+                          example: "5000-100-200"
+                        glAccountDescription:
+                          type: string
+                          example: "Materials Expense"
+                        status:
+                          type: integer
+                          example: 1
+                        updatedAt:
+                          type: string
+                          format: date-time
+                          example: "2026-05-18T12:00:00.000Z"
+              example:
+                page: 1
+                pageSize: 500
+                offset: 0
+                count: 500
+                totalCount: 3370
+                totalPages: 7
+                data:
+                  - glAccountKey: 12345
+                    companyId: "SSC"
+                    glAccountNumber: "5000-100-200"
+                    glAccountDescription: "Materials Expense"
+                    status: 1
+                    updatedAt: "2026-05-18T12:00:00.000Z"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
@@ -586,12 +658,26 @@ components:
       name: pageSize
       in: query
       required: false
+      description: Number of records per page.
       schema:
         type: integer
         minimum: 1
-        maximum: 500
-        default: 100
-      description: Number of records per page.
+        maximum: 1000
+        default: 500
+      example: 500
+    Offset:
+      name: offset
+      in: query
+      required: false
+      description: >
+        Zero-based record offset. If supplied, offset takes priority over page.
+        For example, offset=0&pageSize=500 returns rows 1-500, and
+        offset=500&pageSize=500 returns rows 501-1000.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+      example: 0
   responses:
     BadRequest:
       description: Invalid request
