@@ -223,17 +223,29 @@ app.get('/db-test', async (req, res) => {
 });
 
 app.get('/companies', async (req, res) => {
-    try {
-        const result = await pool.request().query(`
-            SELECT *
-            FROM dbo.tciCompany
-        `);
+  try {
+    const result = await pool.request().query(`
+      SELECT
+          LTRIM(RTRIM(CompanyID)) AS companyId,
+          LTRIM(RTRIM(CompanyName)) AS companyName
+      FROM dbo.tsmCompany
+      ORDER BY CompanyID;
+    `);
 
-        res.json(result.recordset);
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: err.message });
-    }
+    res.json({
+      page: 1,
+      pageSize: result.recordset.length,
+      count: result.recordset.length,
+      data: result.recordset
+    });
+  } catch (err) {
+    console.error('Companies query failed:', err);
+
+    res.status(500).json({
+      error: 'QUERY_FAILED',
+      message: err.message
+    });
+  }
 });
 
 app.listen(port, async () => {
@@ -649,7 +661,31 @@ app.get('/invoice-lines', async (req, res) => {
 app.get('/gl-accounts', async (req, res) => {
   try {
     const requestedPageSize = parseInt(req.query.pageSize || '500', 10);
-    console.log('Requested pageSize:', requestedPageSize);
+    console.log('Requested pageSize:', requestedPageSize);app.get('/companies', async (req, res) => {
+  try {
+    const result = await pool.request().query(`
+      SELECT
+          LTRIM(RTRIM(CompanyID)) AS companyId,
+          LTRIM(RTRIM(CompanyName)) AS companyName
+      FROM dbo.tsmCompany
+      ORDER BY CompanyID;
+    `);
+
+    res.json({
+      page: 1,
+      pageSize: result.recordset.length,
+      count: result.recordset.length,
+      data: result.recordset
+    });
+  } catch (err) {
+    console.error('Companies query failed:', err);
+
+    res.status(500).json({
+      error: 'QUERY_FAILED',
+      message: err.message
+    });
+  }
+});
     const pageSize = Math.min(Math.max(requestedPageSize || 500, 1), 1000);
 
     let offset;
