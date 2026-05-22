@@ -85,6 +85,14 @@ function validateQuadientInvoice(payload) {
     return ['Payload must be a JSON object'];
   }
 
+  const invoiceType = normalizeInvoiceType(payload.invoiceType || 'PO_MATCHED');
+
+  const validInvoiceTypes = ['PO_MATCHED', 'TWO_WAY'];
+
+  if (!validInvoiceTypes.includes(invoiceType)) {
+    errors.push(`invoiceType must be one of: ${validInvoiceTypes.join(', ')}`);
+  }
+
   if (!payload.invoiceNumber) {
     errors.push('invoiceNumber is required');
   }
@@ -115,24 +123,32 @@ function validateQuadientInvoice(payload) {
         errors.push(`lines[${index}].lineAmount is required`);
       }
 
-      if (line.quantity == null) {
-        errors.push(`lines[${index}].quantity is required`);
-      }
-
-      if (line.unitCost == null) {
-        errors.push(`lines[${index}].unitCost is required`);
-      }
-
-      if (line.rcvrLineKey == null) {
-        errors.push(`lines[${index}].rcvrLineKey is required`);
-      }
-
-      if (line.poLineKey == null) {
-        errors.push(`lines[${index}].poLineKey is required`);
-      }
-
       if (line.glAccountKey == null) {
         errors.push(`lines[${index}].glAccountKey is required`);
+      }
+
+      if (invoiceType === 'PO_MATCHED') {
+        if (line.quantity == null) {
+          errors.push(`lines[${index}].quantity is required for PO_MATCHED invoices`);
+        }
+
+        if (line.unitCost == null) {
+          errors.push(`lines[${index}].unitCost is required for PO_MATCHED invoices`);
+        }
+
+        if (line.rcvrLineKey == null) {
+          errors.push(`lines[${index}].rcvrLineKey is required for PO_MATCHED invoices`);
+        }
+
+        if (line.poLineKey == null) {
+          errors.push(`lines[${index}].poLineKey is required for PO_MATCHED invoices`);
+        }
+      }
+
+      if (invoiceType === 'TWO_WAY') {
+        if (!line.description) {
+          errors.push(`lines[${index}].description is required for TWO_WAY invoices`);
+        }
       }
     });
   }
@@ -204,6 +220,46 @@ function cleanString(value) {
   if (value === undefined || value === null) return null;
   const text = String(value).trim();
   return text.length === 0 ? null : text;
+}
+
+function normalizeInvoiceType(value) {
+  const text = cleanString(value || 'PO_MATCHED');
+
+  if (!text) return 'PO_MATCHED';
+
+  const normalized = text
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+
+  if (normalized === 'TWO_WAY' || normalized === '2_WAY' || normalized === 'NON_PO') {
+    return 'TWO_WAY';
+  }
+
+  if (normalized === 'PO_MATCHED' || normalized === 'THREE_WAY' || normalized === '3_WAY') {
+    return 'PO_MATCHED';
+  }
+
+  return normalized;
+}
+
+function normalizeInvoiceType(value) {
+  const text = cleanString(value || 'PO_MATCHED');
+
+  if (!text) return 'PO_MATCHED';
+
+  const normalized = text
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+
+  if (normalized === 'TWO_WAY' || normalized === '2_WAY' || normalized === 'NON_PO') {
+    return 'TWO_WAY';
+  }
+
+  if (normalized === 'PO_MATCHED' || normalized === 'THREE_WAY' || normalized === '3_WAY') {
+    return 'PO_MATCHED';
+  }
+
+  return normalized;
 }
 
 app.get('/db-test', async (req, res) => {
@@ -906,12 +962,12 @@ app.get('/receipts', async (req, res) => {
     const result = await request.query(`
       SELECT
         rcv.RcvrKey AS receiptKey,
-        rcv.TranID AS receiptNumber,
+        LTRIM(RTRIM(rcv.TranID)) AS receiptNumber,
         rcv.TranDate AS receiptDate,
-        rcv.CompanyID AS companyId,
+        LTRIM(RTRIM(rcv.CompanyID)) AS companyId,
 
-        v.VendID AS vendorId,
-        v.VendName AS vendorName,
+        LTRIM(RTRIM(v.VendID)) AS vendorId,
+        LTRIM(RTRIM(v.VendName)) AS vendorName,
 
         line.RcvrLineKey AS receiptLineKey,
         line.SeqNo AS receiptLineNumber,
@@ -919,21 +975,30 @@ app.get('/receipts', async (req, res) => {
         line.UnitCost AS unitCost,
         line.TaxAmt AS taxAmount,
 
-        po.TranID AS poNumber,
+        LTRIM(RTRIM(po.TranID)) AS poNumber,
         pol.POLineNo AS poLineNumber,
         pol.ItemKey AS itemKey,
-        pol.Description AS lineDescription
+        LTRIM(RTRIM(pol.Description)) AS lineDescription,
+
+        pold.QtyOrd AS quantityOrdered,
+        pold.QtyRcvd AS quantityReceived,
+        pold.QtyInvcd AS quantityInvoiced,
+        pold.QtyOpenToRcv AS quantityOpenToReceive,
+        pold.QtyRtrnCredit AS quantityReturnedForCredit,
+        pold.QtyRtrnReplacement AS quantityReturnedForReplacement,
+        pold.GLAcctKey AS glAccountKey
 
       FROM dbo.tpoReceiver rcv
       INNER JOIN dbo.tpoRcvrLine line
         ON rcv.RcvrKey = line.RcvrKey
       INNER JOIN dbo.tapVendor v
         ON rcv.VendKey = v.VendKey
-
       LEFT JOIN dbo.tpoPOLine pol
         ON line.POLineKey = pol.POLineKey
       LEFT JOIN dbo.tpoPurchOrder po
         ON pol.POKey = po.POKey
+      LEFT JOIN dbo.tpoPOLineDist pold
+        ON pold.POLineKey = line.POLineKey
 
       WHERE
         (@updatedSince IS NULL OR rcv.TranDate >= @updatedSince)
@@ -1090,6 +1155,7 @@ app.post('/quadient/invoice', async (req, res) => {
 
     try {
       const headerRequest = new sql.Request(transaction);
+      const invoiceType = normalizeInvoiceType(payload.invoiceType || 'PO_MATCHED');
 
       const headerResult = await headerRequest
         .input('invoiceNumber', sql.NVarChar(50), cleanString(payload.invoiceNumber))
@@ -1103,6 +1169,7 @@ app.post('/quadient/invoice', async (req, res) => {
         .input('currency', sql.NVarChar(10), cleanString(payload.currency))
         .input('totalAmount', sql.Decimal(19, 4), payload.totalAmount)
         .input('rawPayload', sql.NVarChar(sql.MAX), JSON.stringify(payload))
+        .input('invoiceType', sql.NVarChar(20), invoiceType)
         .query(`
           INSERT INTO dbo.QuadientInvoiceStaging (
               InvoiceNumber,
@@ -1145,16 +1212,16 @@ app.post('/quadient/invoice', async (req, res) => {
           .input('lineNumber', sql.Int, line.lineNumber ?? null)
           .input('itemKey', sql.Int, line.itemKey ?? null)
           .input('itemId', sql.NVarChar(100), cleanString(line.itemId))
-          .input('unitCost', sql.Decimal(19, 4), line.unitCost)
-          .input('quantity', sql.Decimal(19, 4), line.quantity)
+          .input('unitCost', sql.Decimal(19, 4), line.unitCost ?? null)
+          .input('quantity', sql.Decimal(19, 4), line.quantity ?? null)
           .input('unitMeasure', sql.NVarChar(20), cleanString(line.unitMeasure))
           //.input('unitMeasKey', sql.Int, line.unitMeasKey ?? null)
           .input('lineAmount', sql.Decimal(19, 4), line.lineAmount)
           .input('poKey', sql.Int, line.poKey ?? null)
           .input('poNumber', sql.NVarChar(50), cleanString(line.poNumber))
-          .input('poLineKey', sql.Int, line.poLineKey)
+          .input('poLineKey', sql.Int, line.poLineKey ?? null)
           .input('poLineNumber', sql.Int, line.poLineNumber ?? null)
-          .input('rcvrLineKey', sql.Int, line.rcvrLineKey)
+          .input('rcvrLineKey', sql.Int, line.rcvrLineKey ?? null)
           .input('description', sql.NVarChar(sql.MAX), cleanString(line.description))
           .input('sTaxClassKey', sql.Int, line.sTaxClassKey ?? null)
           .input('department', sql.NVarChar(50), cleanString(line.department))
