@@ -260,13 +260,16 @@ paths:
   /receipts:
     get:
       summary: Get receiving information
-      description: Returns receipt / receiving information from Sage 500.
+      description: >
+        Returns receipt / receiving information from Sage 500. Receipt lines
+        include PO line identifiers, receiver line identifiers, received quantity,
+        related PO quantity fields, and G/L account key where available.
       tags:
-      - Receipts
+        - Receipts
       parameters:
-      - $ref: '#/components/parameters/UpdatedSince'
-      - $ref: '#/components/parameters/Page'
-      - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/UpdatedSince'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
           description: Receipts / receiving info
@@ -500,22 +503,23 @@ paths:
             schema:
               $ref: '#/components/schemas/QuadientInvoiceRequest'
             examples:
-              poMatchedInvoice:
-                summary: PO matched / 3-way invoice
+              poMatchedWithAdditionalCharge:
+                summary: PO matched invoice with additional charge line
                 value:
                   invoiceType: "PO_MATCHED"
-                  invoiceNumber: "TEST-PO-1001"
+                  invoiceNumber: "TEST-MIXED-PO-1001"
                   vendorKey: 12345
                   vendorId: "TESTVENDOR"
-                  invoiceDate: "2026-05-18"
-                  dueDate: "2026-06-17"
-                  memo: "Test PO-matched invoice from Quadient"
-                  beanworksInvoiceUrl: "https://example.com/beanworks/invoices/TEST-PO-1001"
+                  invoiceDate: "2026-05-22"
+                  dueDate: "2026-06-21"
+                  memo: "Test PO matched invoice with additional freight charge"
+                  beanworksInvoiceUrl: "https://example.com/beanworks/invoice/TEST-MIXED-PO-1001"
                   currency: "USD"
-                  companyId: "001"
-                  totalAmount: 250.00
+                  companyId: "SSC"
+                  totalAmount: 150.00
                   lines:
-                    - lineNumber: 1
+                    - lineType: "PO_MATCHED"
+                      lineNumber: 1
                       itemKey: 1001
                       itemId: "TESTITEM-001"
                       unitCost: 25.00
@@ -527,7 +531,7 @@ paths:
                       poLineKey: 60001
                       poLineNumber: 1
                       rcvrLineKey: 70001
-                      description: "PO-matched invoice line 1"
+                      description: "PO matched test line"
                       sTaxClassKey: null
                       department: "TEST"
                       costCenter: "TEST"
@@ -538,29 +542,14 @@ paths:
                       quantityOpenToReceive: 0
                       quantityReturnedForCredit: 0
                       quantityReturnedForReplacement: 0
-                    - lineNumber: 2
-                      itemKey: 1002
-                      itemId: "TESTITEM-002"
-                      unitCost: 75.00
-                      quantity: 2
-                      unitMeasure: "EA"
-                      lineAmount: 150.00
-                      poKey: 50001
-                      poNumber: "PO-TEST-001"
-                      poLineKey: 60002
-                      poLineNumber: 2
-                      rcvrLineKey: 70002
-                      description: "PO-matched invoice line 2"
-                      sTaxClassKey: null
+                    - lineType: "ADDITIONAL_CHARGE"
+                      lineNumber: 2
+                      description: "Freight charge"
+                      lineAmount: 50.00
+                      glAccountKey: 80002
                       department: "TEST"
                       costCenter: "TEST"
-                      glAccountKey: 80001
-                      quantityOrdered: 2
-                      quantityReceived: 2
-                      quantityInvoiced: 2
-                      quantityOpenToReceive: 0
-                      quantityReturnedForCredit: 0
-                      quantityReturnedForReplacement: 0
+                      sTaxClassKey: null
 
               twoWayInvoice:
                 summary: 2-way / non-PO invoice
@@ -569,28 +558,22 @@ paths:
                   invoiceNumber: "TEST-2WAY-1001"
                   vendorKey: 12345
                   vendorId: "TESTVENDOR"
-                  invoiceDate: "2026-05-18"
-                  dueDate: "2026-06-17"
-                  memo: "Test 2-way invoice from Quadient"
-                  beanworksInvoiceUrl: "https://example.com/beanworks/invoices/TEST-2WAY-1001"
+                  invoiceDate: "2026-05-22"
+                  dueDate: "2026-06-21"
+                  memo: "Test 2-way invoice from Quadient API endpoint"
+                  beanworksInvoiceUrl: "https://example.com/beanworks/invoice/TEST-2WAY-1001"
                   currency: "USD"
-                  companyId: "001"
-                  totalAmount: 250.00
+                  companyId: "SSC"
+                  totalAmount: 125.00
                   lines:
-                    - lineNumber: 1
-                      description: "2-way invoice expense line 1"
-                      lineAmount: 100.00
+                    - lineType: "ADDITIONAL_CHARGE"
+                      lineNumber: 1
+                      description: "2-way invoice expense line"
+                      lineAmount: 125.00
                       glAccountKey: 80001
-                      sTaxClassKey: null
                       department: "TEST"
                       costCenter: "TEST"
-                    - lineNumber: 2
-                      description: "2-way invoice expense line 2"
-                      lineAmount: 150.00
-                      glAccountKey: 80001
-                      sTaxClassKey: null
-                      department: "TEST"
-                      costCenter: "TEST"
+                      sTaxClassKey: null      
       responses:
         '201':
           description: Invoice received and staged for DIM import
@@ -908,63 +891,98 @@ components:
           nullable: true
           example: 10
     ReceiptList:
-      allOf:
-      - $ref: '#/components/schemas/PagedResponseBase'
-      - type: object
-        properties:
-          data:
-            type: array
-            items:
-              $ref: '#/components/schemas/Receipt'
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Receipt'
+        pagination:
+          type: object
+          properties:
+            page:
+              type: integer
+              example: 1
+            pageSize:
+              type: integer
+              example: 100
+      example:
+        data:
+          - receiptKey: 34300
+            receiptNumber: "0000034300"
+            receiptDate: "2026-04-27T00:00:00.000Z"
+            companyId: "SSC"
+            vendorId: "INSUL"
+            vendorName: "Insulectro (EFT)"
+            receiptLineKey: 149778
+            receiptLineNumber: 1
+            poLineKey: 147845
+            unitCost: 2.74
+            taxAmount: 0
+            poNumber: "0000071995"
+            poLineNumber: 1
+            itemKey: 456
+            lineDescription: "Paco Plus 18x24 8-Hole"
+            quantityOrdered: 600
+            quantityReceived: 600
+            quantityInvoiced: 0
+            quantityOpenToReceive: 0
+            quantityReturnedForCredit: 0
+            quantityReturnedForReplacement: 0
+            glAccountKey: 568000
+        pagination:
+          page: 1
+          pageSize: 100
+
     Receipt:
       type: object
       properties:
         receiptKey:
           type: integer
-          example: 30000
+          example: 34300
         receiptNumber:
           type: string
-          example: '000034300'
+          example: "0000034300"
         receiptDate:
           type: string
           format: date-time
+          nullable: true
+          example: "2026-04-27T00:00:00.000Z"
         companyId:
           type: string
-          example: '001'
-        vendKey:
-          type: integer
-          nullable: true
-          example: 12345
+          example: "SSC"
         vendorId:
           type: string
-          example: INSUL
+          example: "INSUL"
         vendorName:
           type: string
-          example: Insulectro (EFT)
+          example: "Insulectro (EFT)"
         receiptLineKey:
           type: integer
-          description: Receipt line key. May correspond to Sage 500 tpoRcvrLine.RcvrLineKey depending on endpoint implementation.
-          example: 30001
-        rcvrLineKey:
-          type: integer
-          description: Sage 500 tpoRcvrLine.RcvrLineKey. Critical 3-way match identifier.
-          nullable: true
-          example: 30001
+          example: 149778
         receiptLineNumber:
           type: integer
-          example: 1
-        poKey:
-          type: integer
           nullable: true
-          example: 10001
-        poNumber:
-          type: string
-          example: 00007195
+          example: 1
         poLineKey:
           type: integer
-          example: 20001
+          nullable: true
+          example: 147845
+        unitCost:
+          type: number
+          nullable: true
+          example: 2.74
+        taxAmount:
+          type: number
+          nullable: true
+          example: 0
+        poNumber:
+          type: string
+          nullable: true
+          example: "0000071995"
         poLineNumber:
           type: integer
+          nullable: true
           example: 1
         itemKey:
           type: integer
@@ -972,13 +990,44 @@ components:
           example: 456
         lineDescription:
           type: string
-        unitCost:
-          type: number
-          example: 12.5
-        taxAmount:
+          nullable: true
+          example: "Paco Plus 18x24 8-Hole"
+
+        quantityOrdered:
           type: number
           nullable: true
+          description: Quantity ordered from Sage PO line distribution data.
+          example: 600
+        quantityReceived:
+          type: number
+          nullable: true
+          description: Quantity received from Sage PO line distribution data.
+          example: 600
+        quantityInvoiced:
+          type: number
+          nullable: true
+          description: Quantity invoiced from Sage PO line distribution data.
           example: 0
+        quantityOpenToReceive:
+          type: number
+          nullable: true
+          description: Quantity still open to receive from Sage PO line distribution data.
+          example: 0
+        quantityReturnedForCredit:
+          type: number
+          nullable: true
+          description: Quantity returned for credit from Sage PO line distribution data.
+          example: 0
+        quantityReturnedForReplacement:
+          type: number
+          nullable: true
+          description: Quantity returned for replacement from Sage PO line distribution data.
+          example: 0
+        glAccountKey:
+          type: integer
+          nullable: true
+          description: Sage G/L account key from PO line distribution.
+          example: 568000   
     InvoiceList:
       allOf:
       - $ref: '#/components/schemas/PagedResponseBase'
@@ -1104,8 +1153,12 @@ components:
         invoiceType:
           type: string
           description: >
-            Invoice processing type. PO_MATCHED is used for 3-way PO/receipt matched invoices.
-            TWO_WAY is used for non-PO / 2-way invoices. If omitted, the API treats the invoice as PO_MATCHED.
+            Invoice processing type. Official values are PO_MATCHED and TWO_WAY.
+            PO_MATCHED is used for PO/receipt matched invoices and may also include
+            ADDITIONAL_CHARGE lines such as freight or packaging. TWO_WAY is used
+            for non-PO / 2-way invoices. If omitted, the API treats the invoice
+            as PO_MATCHED. The API also normalizes common variants such as
+            "TWO WAY", "2 WAY", "NON_PO", "THREE WAY", and "3 WAY".
           enum:
             - PO_MATCHED
             - TWO_WAY
@@ -1177,6 +1230,18 @@ components:
           type: integer
           nullable: true
           example: 1
+        lineType:
+          type: string
+          nullable: true
+          description: >
+            Optional line type. Use PO_MATCHED for receipt-matched PO lines.
+            Use ADDITIONAL_CHARGE for freight, packaging, or miscellaneous charges
+            on a PO invoice that do not have poLineKey or rcvrLineKey. If omitted,
+            the API infers the line type from whether poLineKey or rcvrLineKey is present.
+          enum:
+            - PO_MATCHED
+            - ADDITIONAL_CHARGE
+          example: "PO_MATCHED"
         itemKey:
           type: integer
           nullable: true
@@ -1277,6 +1342,16 @@ components:
           type: integer
           nullable: true
           example: 1
+        lineType:
+          type: string
+          nullable: true
+          description: >
+            Optional line type. TWO_WAY invoice lines are treated as non-PO /
+            additional charge lines. If omitted, the API treats the line as
+            ADDITIONAL_CHARGE.
+          enum:
+            - ADDITIONAL_CHARGE
+          example: "ADDITIONAL_CHARGE"
         description:
           type: string
           description: Description is required for TWO_WAY invoice lines.

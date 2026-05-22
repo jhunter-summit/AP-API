@@ -86,7 +86,6 @@ function validateQuadientInvoice(payload) {
   }
 
   const invoiceType = normalizeInvoiceType(payload.invoiceType || 'PO_MATCHED');
-
   const validInvoiceTypes = ['PO_MATCHED', 'TWO_WAY'];
 
   if (!validInvoiceTypes.includes(invoiceType)) {
@@ -119,6 +118,13 @@ function validateQuadientInvoice(payload) {
 
   if (Array.isArray(payload.lines)) {
     payload.lines.forEach((line, index) => {
+      const lineType = normalizeInvoiceLineType(line);
+      const validLineTypes = ['PO_MATCHED', 'ADDITIONAL_CHARGE'];
+
+      if (!validLineTypes.includes(lineType)) {
+        errors.push(`lines[${index}].lineType must be one of: ${validLineTypes.join(', ')}`);
+      }
+
       if (line.lineAmount == null) {
         errors.push(`lines[${index}].lineAmount is required`);
       }
@@ -128,20 +134,28 @@ function validateQuadientInvoice(payload) {
       }
 
       if (invoiceType === 'PO_MATCHED') {
-        if (line.quantity == null) {
-          errors.push(`lines[${index}].quantity is required for PO_MATCHED invoices`);
+        if (lineType === 'PO_MATCHED') {
+          if (line.quantity == null) {
+            errors.push(`lines[${index}].quantity is required for PO_MATCHED invoice lines`);
+          }
+
+          if (line.unitCost == null) {
+            errors.push(`lines[${index}].unitCost is required for PO_MATCHED invoice lines`);
+          }
+
+          if (line.rcvrLineKey == null) {
+            errors.push(`lines[${index}].rcvrLineKey is required for PO_MATCHED invoice lines`);
+          }
+
+          if (line.poLineKey == null) {
+            errors.push(`lines[${index}].poLineKey is required for PO_MATCHED invoice lines`);
+          }
         }
 
-        if (line.unitCost == null) {
-          errors.push(`lines[${index}].unitCost is required for PO_MATCHED invoices`);
-        }
-
-        if (line.rcvrLineKey == null) {
-          errors.push(`lines[${index}].rcvrLineKey is required for PO_MATCHED invoices`);
-        }
-
-        if (line.poLineKey == null) {
-          errors.push(`lines[${index}].poLineKey is required for PO_MATCHED invoices`);
+        if (lineType === 'ADDITIONAL_CHARGE') {
+          if (!line.description) {
+            errors.push(`lines[${index}].description is required for ADDITIONAL_CHARGE lines`);
+          }
         }
       }
 
@@ -240,6 +254,44 @@ function normalizeInvoiceType(value) {
   }
 
   return normalized;
+}
+
+function normalizeInvoiceLineType(line) {
+  const explicitType = cleanString(line.lineType);
+
+  if (explicitType) {
+    const normalized = explicitType
+      .toUpperCase()
+      .replace(/[\s-]+/g, '_');
+
+    if (
+      normalized === 'PO_MATCHED' ||
+      normalized === 'PO' ||
+      normalized === 'RECEIPT_MATCHED' ||
+      normalized === 'RECEIVER_MATCHED'
+    ) {
+      return 'PO_MATCHED';
+    }
+
+    if (
+      normalized === 'ADDITIONAL_CHARGE' ||
+      normalized === 'NON_PO' ||
+      normalized === 'FREIGHT' ||
+      normalized === 'PACKAGING' ||
+      normalized === 'MISC' ||
+      normalized === 'MISC_CHARGE'
+    ) {
+      return 'ADDITIONAL_CHARGE';
+    }
+
+    return normalized;
+  }
+
+  if (line.poLineKey != null || line.rcvrLineKey != null) {
+    return 'PO_MATCHED';
+  }
+
+  return 'ADDITIONAL_CHARGE';
 }
 
 function normalizeInvoiceType(value) {
@@ -1135,7 +1187,6 @@ app.post('/quadient/invoice', async (req, res) => {
 
   try {
     const validationErrors = validateQuadientInvoice(payload);
-
     if (validationErrors.length > 0) {
       writeLog('quadient-invoice.log', 'INVOICE_VALIDATION_FAILED', {
         invoiceNumber: payload?.invoiceNumber || null,
@@ -1171,44 +1222,48 @@ app.post('/quadient/invoice', async (req, res) => {
         .input('rawPayload', sql.NVarChar(sql.MAX), JSON.stringify(payload))
         .input('invoiceType', sql.NVarChar(20), invoiceType)
         .query(`
-          INSERT INTO dbo.QuadientInvoiceStaging (
-              InvoiceNumber,
-              VendKey,
-              VendorID,
-              CompanyID,
-              InvoiceDate,
-              DueDate,
-              Memo,
-              BeanworksInvoiceURL,
-              Currency,
-              TotalAmount,
-              RawPayload,
-              ProcessingStatus
-          )
-          OUTPUT INSERTED.QuadientInvoiceStagingID AS stagingId
-          VALUES (
-              @invoiceNumber,
-              @vendKey,
-              @vendorId,
-              @companyId,
-              @invoiceDate,
-              @dueDate,
-              @memo,
-              @beanworksInvoiceUrl,
-              @currency,
-              @totalAmount,
-              @rawPayload,
-              'ReadyForDIM'
-          );
-        `);
+            INSERT INTO dbo.QuadientInvoiceStaging (
+                InvoiceType,
+                InvoiceNumber,
+                VendKey,
+                VendorID,
+                CompanyID,
+                InvoiceDate,
+                DueDate,
+                Memo,
+                BeanworksInvoiceURL,
+                Currency,
+                TotalAmount,
+                RawPayload,
+                ProcessingStatus
+            )
+            OUTPUT INSERTED.QuadientInvoiceStagingID AS stagingId
+            VALUES (
+                @invoiceType,
+                @invoiceNumber,
+                @vendKey,
+                @vendorId,
+                @companyId,
+                @invoiceDate,
+                @dueDate,
+                @memo,
+                @beanworksInvoiceUrl,
+                @currency,
+                @totalAmount,
+                @rawPayload,
+                'ReadyForDIM'
+            );
+    `);
 
       const stagingId = headerResult.recordset[0].stagingId;
 
       for (const line of payload.lines) {
         const lineRequest = new sql.Request(transaction);
+        const lineType = normalizeInvoiceLineType(line);
 
         await lineRequest
           .input('stagingId', sql.Int, stagingId)
+          .input('lineType', sql.NVarChar(30), lineType)
           .input('lineNumber', sql.Int, line.lineNumber ?? null)
           .input('itemKey', sql.Int, line.itemKey ?? null)
           .input('itemId', sql.NVarChar(100), cleanString(line.itemId))
@@ -1236,6 +1291,7 @@ app.post('/quadient/invoice', async (req, res) => {
           .query(`
             INSERT INTO dbo.QuadientInvoiceLineStaging (
                 QuadientInvoiceStagingID,
+                LineType,
                 LineNumber,
                 ItemKey,
                 ItemID,
@@ -1262,6 +1318,7 @@ app.post('/quadient/invoice', async (req, res) => {
             )
             VALUES (
                 @stagingId,
+                @lineType,
                 @lineNumber,
                 @itemKey,
                 @itemId,
