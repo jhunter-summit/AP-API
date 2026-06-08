@@ -959,14 +959,34 @@ app.get('/purchase-orders', async (req, res) => {
           pol.POLineKey AS poLineKey,
           pol.POLineNo AS poLineNumber,
           pol.ItemKey AS itemKey,
-          pol.Description AS lineDescription,
+          LTRIM(RTRIM(pol.Description)) AS lineDescription,
           pol.UnitCost AS unitCost,
           pol.ExtAmt AS lineAmount,
+
+          pold.QtyOrd AS quantityOrdered,
+          pold.QtyRcvd AS quantityReceived,
+          pold.QtyInvcd AS quantityInvoiced,
+          pold.QtyOpenToRcv AS quantityOpenToReceive,
+          pold.QtyRtrnCredit AS quantityReturnedForCredit,
+          pold.QtyRtrnReplacement AS quantityReturnedForReplacement,
+
+          pold.GLAcctKey AS glAccountKey,
+          LTRIM(RTRIM(gl.GLAcctNo)) AS glAccountNumber,
+          LTRIM(RTRIM(gl.Description)) AS glAccountDescription,
+
           CASE
-              WHEN pol.UnitCost <> 0 THEN pol.ExtAmt / pol.UnitCost
+              WHEN pol.UnitCost IS NOT NULL AND pol.UnitCost <> 0 THEN pol.ExtAmt / pol.UnitCost
               ELSE NULL
-          END AS quantityOrdered
+          END AS calculatedQuantityOrdered
+
       FROM dbo.tpoPOLine pol
+
+      LEFT JOIN dbo.tpoPOLineDist pold
+          ON pold.POLineKey = pol.POLineKey
+
+      LEFT JOIN dbo.tglAccount gl
+          ON gl.GLAcctKey = pold.GLAcctKey
+
       WHERE pol.POKey IN (${poKeyParams.join(', ')})
       ORDER BY pol.POKey, pol.POLineNo;
     `);
@@ -1282,6 +1302,8 @@ app.post('/quadient/invoice', async (req, res) => {
           .input('department', sql.NVarChar(50), cleanString(line.department))
           .input('costCenter', sql.NVarChar(50), cleanString(line.costCenter))
           .input('glAccountKey', sql.Int, line.glAccountKey ?? null)
+          .input('glAccountNumber', sql.NVarChar(50), cleanString(line.glAccountNumber))
+          .input('glAccountDescription', sql.NVarChar(255), cleanString(line.glAccountDescription))
           .input('quantityOrdered', sql.Decimal(19, 4), line.quantityOrdered ?? null)
           .input('quantityReceived', sql.Decimal(19, 4), line.quantityReceived ?? null)
           .input('quantityInvoiced', sql.Decimal(19, 4), line.quantityInvoiced ?? null)
@@ -1309,6 +1331,8 @@ app.post('/quadient/invoice', async (req, res) => {
                 Department,
                 CostCenter,
                 GLAcctKey,
+                GLAccountNumber,
+                GLAccountDescription,
                 QuantityOrdered,
                 QuantityReceived,
                 QuantityInvoiced,
@@ -1336,6 +1360,8 @@ app.post('/quadient/invoice', async (req, res) => {
                 @department,
                 @costCenter,
                 @glAccountKey,
+                @glAccountNumber,
+                @glAccountDescription,
                 @quantityOrdered,
                 @quantityReceived,
                 @quantityInvoiced,

@@ -484,16 +484,15 @@ paths:
     post:
       summary: Receive one invoice from Quadient Beanworks
       description: >
-        Receives one invoice per request from Quadient Beanworks and stores it
-        in staging tables for Sage 500 Data Import Manager processing. This
-        endpoint does not write directly to Sage voucher tables.
-
-        For PO_MATCHED invoices, each line must include unitCost, quantity,
-        lineAmount, poLineKey, rcvrLineKey, and glAccountKey.
-
-        For TWO_WAY invoices, each line must include lineAmount, glAccountKey,
-        and description. PO and receiver line keys are not required for TWO_WAY
-        invoices.
+        Receives invoice data from Quadient and stages it for Sage 500 import.
+        PO_MATCHED invoices may include both receipt-matched PO lines and
+        ADDITIONAL_CHARGE lines such as freight, tariff, packaging, or miscellaneous
+        charges. PO_MATCHED lines require poLineKey, rcvrLineKey, quantity, unitCost,
+        lineAmount, and glAccountKey. ADDITIONAL_CHARGE lines do not require PO or
+        receiver line keys, but they do require description, lineAmount, and
+        glAccountKey. Optional glAccountNumber and glAccountDescription may be supplied
+        for audit/display purposes. The API validates required fields and stages the
+        invoice for DIM processing; final Sage import validation is handled downstream.
       tags:
       - Quadient Inbound
       requestBody:
@@ -503,20 +502,21 @@ paths:
             schema:
               $ref: '#/components/schemas/QuadientInvoiceRequest'
             examples:
+            examples:
               poMatchedWithAdditionalCharge:
-                summary: PO matched invoice with additional charge line
+                summary: PO matched invoice with added freight/tariff charge
                 value:
                   invoiceType: "PO_MATCHED"
-                  invoiceNumber: "TEST-MIXED-PO-1001"
+                  invoiceNumber: "TEST-GL-CHARGE-1001"
                   vendorKey: 12345
                   vendorId: "TESTVENDOR"
                   invoiceDate: "2026-05-22"
                   dueDate: "2026-06-21"
-                  memo: "Test PO matched invoice with additional freight charge"
-                  beanworksInvoiceUrl: "https://example.com/beanworks/invoice/TEST-MIXED-PO-1001"
+                  memo: "Test PO invoice with GL account info on added charge"
+                  beanworksInvoiceUrl: "https://example.com/beanworks/invoice/TEST-GL-CHARGE-1001"
                   currency: "USD"
                   companyId: "SSC"
-                  totalAmount: 150.00
+                  totalAmount: 175.00
                   lines:
                     - lineType: "PO_MATCHED"
                       lineNumber: 1
@@ -536,6 +536,8 @@ paths:
                       department: "TEST"
                       costCenter: "TEST"
                       glAccountKey: 80001
+                      glAccountNumber: "PO-GL-TEST"
+                      glAccountDescription: "PO line GL account"
                       quantityOrdered: 4
                       quantityReceived: 4
                       quantityInvoiced: 4
@@ -544,9 +546,11 @@ paths:
                       quantityReturnedForReplacement: 0
                     - lineType: "ADDITIONAL_CHARGE"
                       lineNumber: 2
-                      description: "Freight charge"
-                      lineAmount: 50.00
+                      description: "Tariff fee"
+                      lineAmount: 75.00
                       glAccountKey: 80002
+                      glAccountNumber: "TARIFF-GL-TEST"
+                      glAccountDescription: "Tariff and freight expense"
                       department: "TEST"
                       costCenter: "TEST"
                       sTaxClassKey: null
@@ -571,9 +575,11 @@ paths:
                       description: "2-way invoice expense line"
                       lineAmount: 125.00
                       glAccountKey: 80001
+                      glAccountNumber: "2WAY-GL-TEST"
+                      glAccountDescription: "2-way expense GL account"
                       department: "TEST"
                       costCenter: "TEST"
-                      sTaxClassKey: null      
+                      sTaxClassKey: null   
       responses:
         '201':
           description: Invoice received and staged for DIM import
@@ -1155,10 +1161,10 @@ components:
           description: >
             Invoice processing type. Official values are PO_MATCHED and TWO_WAY.
             PO_MATCHED is used for PO/receipt matched invoices and may also include
-            ADDITIONAL_CHARGE lines such as freight or packaging. TWO_WAY is used
-            for non-PO / 2-way invoices. If omitted, the API treats the invoice
-            as PO_MATCHED. The API also normalizes common variants such as
-            "TWO WAY", "2 WAY", "NON_PO", "THREE WAY", and "3 WAY".
+            ADDITIONAL_CHARGE lines such as freight, tariff, packaging, or miscellaneous
+            charges. TWO_WAY is used for non-PO / 2-way invoices. If omitted, the API
+            treats the invoice as PO_MATCHED. The API also normalizes common variants
+            such as "TWO WAY", "2 WAY", "NON_PO", "THREE WAY", and "3 WAY".
           enum:
             - PO_MATCHED
             - TWO_WAY
@@ -1235,13 +1241,36 @@ components:
           nullable: true
           description: >
             Optional line type. Use PO_MATCHED for receipt-matched PO lines.
-            Use ADDITIONAL_CHARGE for freight, packaging, or miscellaneous charges
-            on a PO invoice that do not have poLineKey or rcvrLineKey. If omitted,
-            the API infers the line type from whether poLineKey or rcvrLineKey is present.
+            Use ADDITIONAL_CHARGE for freight, tariff, packaging, or miscellaneous
+            charges on a PO invoice that do not have poLineKey or rcvrLineKey.
+            If omitted, the API infers the line type from whether poLineKey or
+            rcvrLineKey is present.
           enum:
             - PO_MATCHED
             - ADDITIONAL_CHARGE
           example: "PO_MATCHED"
+
+        glAccountKey:
+          type: integer
+          description: >
+            Sage G/L account key. Required for all incoming invoice lines,
+            including PO-matched lines and additional charge lines.
+          example: 80001
+
+        glAccountNumber:
+          type: string
+          nullable: true
+          description: >
+            Optional display G/L account number supplied by Quadient for audit/display.
+            The integration key remains glAccountKey.
+          example: "5000-100-200"
+
+        glAccountDescription:
+          type: string
+          nullable: true
+          description: >
+            Optional display G/L account description supplied by Quadient for audit/display.
+          example: "Freight and tariff expense"
         itemKey:
           type: integer
           nullable: true
@@ -1362,8 +1391,21 @@ components:
           example: 125
         glAccountKey:
           type: integer
-          description: Sage 500 G/L account key for this invoice line.
+          description: Sage G/L account key. Required for all TWO_WAY / non-PO invoice lines.
           example: 80001
+        glAccountNumber:
+          type: string
+          nullable: true
+          description: >
+            Optional display G/L account number supplied by Quadient for audit/display.
+            The integration key remains glAccountKey.
+          example: "5000-100-200"
+        glAccountDescription:
+          type: string
+          nullable: true
+          description: >
+            Optional display G/L account description supplied by Quadient for audit/display.
+          example: "2-way expense GL account"
         sTaxClassKey:
           type: integer
           nullable: true
