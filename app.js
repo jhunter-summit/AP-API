@@ -42,6 +42,11 @@ const config = {
     trustServerCertificate: true
   }
 };
+const crypto = require('crypto');
+
+const SAGE_DIM_TRAN_TYPE_ID = process.env.SAGE_DIM_TRAN_TYPE_ID || 'IN';
+const SAGE_DIM_PO_MATCH_STATUS = process.env.SAGE_DIM_PO_MATCH_STATUS || 'Matched';
+const ENABLE_DIM_TEST_ENDPOINT = process.env.ENABLE_DIM_TEST_ENDPOINT === 'true';
 
 let pool;
 
@@ -180,10 +185,291 @@ function validateQuadientInvoice(payload) {
   return errors;
 }
 
+async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
+  if (!stagingId && !invoiceNumber) {
+    const err = new Error('Either stagingId or invoiceNumber is required');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const sessionKey = crypto.randomInt(1, 2147483647);
+  const tranTypeId = SAGE_DIM_TRAN_TYPE_ID;
+  const poMatchedStatus = SAGE_DIM_PO_MATCH_STATUS;
+
+  const transaction = new sql.Transaction(pool);
+
+  await transaction.begin();
+
+  try {
+    // Resolve the Quadient staging row first.
+    const findRequest = new sql.Request(transaction);
+
+    let findResult;
+
+    if (stagingId) {
+      findResult = await findRequest
+        .input('stagingId', sql.Int, stagingId)
+        .query(`
+          SELECT TOP 1
+              QuadientInvoiceStagingID,
+              InvoiceNumber,
+              ProcessingStatus
+          FROM dbo.QuadientInvoiceStaging
+          WHERE QuadientInvoiceStagingID = @stagingId;
+        `);
+    } else {
+      findResult = await findRequest
+        .input('invoiceNumber', sql.NVarChar(50), cleanString(invoiceNumber))
+        .query(`
+          SELECT TOP 1
+              QuadientInvoiceStagingID,
+              InvoiceNumber,
+              ProcessingStatus
+          FROM dbo.QuadientInvoiceStaging
+          WHERE InvoiceNumber = @invoiceNumber
+          ORDER BY QuadientInvoiceStagingID DESC;
+        `);
+    }
+
+    if (findResult.recordset.length === 0) {
+      const err = new Error('Quadient invoice staging record was not found');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const invoice = findResult.recordset[0];
+    const resolvedStagingId = invoice.QuadientInvoiceStagingID;
+    const tranNo = String(invoice.InvoiceNumber || '').substring(0, 15);
+
+    if (!tranNo) {
+      const err = new Error('InvoiceNumber is required to create Sage DIM TranNo');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (invoice.ProcessingStatus === 'PushedToSageStaging') {
+      const err = new Error(`Invoice staging record ${resolvedStagingId} has already been pushed to Sage staging`);
+      err.statusCode = 409;
+      throw err;
+    }
+
+    // Header insert: QuadientInvoiceStaging -> StgPendVoucher
+    const headerRequest = new sql.Request(transaction);
+
+    const headerResult = await headerRequest
+      .input('stagingId', sql.Int, resolvedStagingId)
+      .input('sessionKey', sql.Int, sessionKey)
+      .input('tranNo', sql.VarChar(15), tranNo)
+      .input('tranTypeId', sql.VarChar(2), tranTypeId)
+      .query(`
+        INSERT INTO dbo.StgPendVoucher (
+            CurrID,
+            DueDate,
+            InvcRcptDate,
+            PostDate,
+            PurchAmt,
+            TranAmt,
+            TranAmtHC,
+            TranCmnt,
+            TranDate,
+            TranNo,
+            TranTypeID,
+            VendID,
+            ProcessStatus,
+            SessionKey
+        )
+        OUTPUT INSERTED.RowKey AS pendVoucherRowKey
+        SELECT
+            LEFT(ISNULL(h.Currency, 'USD'), 3) AS CurrID,
+            h.DueDate,
+            h.InvoiceDate AS InvcRcptDate,
+            h.InvoiceDate AS PostDate,
+            CAST(ROUND(h.TotalAmount, 2) AS DECIMAL(15, 2)) AS PurchAmt,
+            CAST(ROUND(h.TotalAmount, 2) AS DECIMAL(15, 2)) AS TranAmt,
+            CAST(ROUND(h.TotalAmount, 2) AS DECIMAL(15, 2)) AS TranAmtHC,
+            LEFT(ISNULL(h.Memo, ''), 50) AS TranCmnt,
+            h.InvoiceDate AS TranDate,
+            @tranNo AS TranNo,
+            @tranTypeId AS TranTypeID,
+            LEFT(h.VendorID, 12) AS VendID,
+            0 AS ProcessStatus,
+            @sessionKey AS SessionKey
+        FROM dbo.QuadientInvoiceStaging h
+        WHERE h.QuadientInvoiceStagingID = @stagingId;
+      `);
+
+    if (headerResult.recordset.length === 0) {
+      const err = new Error('Failed to insert Sage DIM voucher header');
+      err.statusCode = 500;
+      throw err;
+    }
+
+    const pendVoucherRowKey = headerResult.recordset[0].pendVoucherRowKey;
+
+    // Detail insert: QuadientInvoiceLineStaging -> StgVoucherDetl
+    const lineRequest = new sql.Request(transaction);
+
+    const lineResult = await lineRequest
+      .input('stagingId', sql.Int, resolvedStagingId)
+      .input('sessionKey', sql.Int, sessionKey)
+      .input('tranNo', sql.VarChar(15), tranNo)
+      .input('tranTypeId', sql.VarChar(2), tranTypeId)
+      .input('poMatchedStatus', sql.VarChar(25), poMatchedStatus)
+      .query(`
+        INSERT INTO dbo.StgVoucherDetl (
+            Description,
+            ExtAmt,
+            ExtCmnt,
+            GLAcctNo,
+            ItemID,
+            MatchStatus,
+            PONo,
+            POLineNo,
+            Quantity,
+            SeqNo,
+            TargetCompanyID,
+            TranNo,
+            TranTypeID,
+            UnitCost,
+            UnitMeasID,
+            ProcessStatus,
+            SessionKey
+        )
+        OUTPUT INSERTED.RowKey AS voucherDetailRowKey
+        SELECT
+            LEFT(ISNULL(l.Description, ''), 40) AS Description,
+
+            CAST(ROUND(l.LineAmount, 2) AS DECIMAL(15, 2)) AS ExtAmt
+
+            LEFT(ISNULL(l.Description, ''), 255) AS ExtCmnt,
+
+            LEFT(
+                REPLACE(
+                    COALESCE(l.GLAccountNumber, gl.GLAcctNo),
+                    '-',
+                    ''
+                ),
+                100
+            ) AS GLAcctNo,
+
+            LEFT(l.ItemID, 30) AS ItemID,
+
+            CASE
+                WHEN l.LineType = 'PO_MATCHED' THEN @poMatchedStatus
+                ELSE NULL
+            END AS MatchStatus,
+
+            LEFT(l.PONumber, 10) AS PONo,
+            l.POLineNumber AS POLineNo,
+
+            CAST(ROUND(l.Quantity, 8) AS DECIMAL(16, 8)) AS Quantity,
+
+            ISNULL(l.LineNumber, 1) AS SeqNo,
+
+            LEFT(h.CompanyID, 3) AS TargetCompanyID,
+            @tranNo AS TranNo,
+            @tranTypeId AS TranTypeID,
+
+            CAST(ROUND(l.UnitCost, 5) AS DECIMAL(15, 5)) AS UnitCost,
+
+            LEFT(l.UnitMeasure, 6) AS UnitMeasID,
+
+            0 AS ProcessStatus,
+            @sessionKey AS SessionKey
+        FROM dbo.QuadientInvoiceLineStaging l
+        INNER JOIN dbo.QuadientInvoiceStaging h
+            ON h.QuadientInvoiceStagingID = l.QuadientInvoiceStagingID
+        LEFT JOIN dbo.tglAccount gl
+            ON gl.GLAcctKey = l.GLAcctKey
+        WHERE h.QuadientInvoiceStagingID = @stagingId;
+      `);
+
+    const detailCount = lineResult.recordset.length;
+
+    if (detailCount === 0) {
+      const err = new Error('No invoice lines were inserted into Sage DIM staging');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // Mark your historical staging row as pushed.
+    const updateRequest = new sql.Request(transaction);
+
+    await updateRequest
+      .input('stagingId', sql.Int, resolvedStagingId)
+      .input('sessionKey', sql.Int, sessionKey)
+      .input('tranNo', sql.VarChar(15), tranNo)
+      .input('tranTypeId', sql.VarChar(2), tranTypeId)
+      .input('message', sql.NVarChar(sql.MAX), `Pushed to Sage DIM staging. SessionKey=${sessionKey}; TranNo=${tranNo}; TranTypeID=${tranTypeId}; HeaderRowKey=${pendVoucherRowKey}; DetailRows=${detailCount}`)
+      .query(`
+        UPDATE dbo.QuadientInvoiceStaging
+        SET
+            ProcessingStatus = 'PushedToSageStaging',
+            ProcessingMessage = @message,
+            ProcessedAt = GETDATE()
+        WHERE QuadientInvoiceStagingID = @stagingId;
+      `);
+
+    await transaction.commit();
+
+    return {
+      stagingId: resolvedStagingId,
+      invoiceNumber: invoice.InvoiceNumber,
+      tranNo,
+      tranTypeId,
+      sessionKey,
+      pendVoucherRowKey,
+      detailCount,
+      processingStatus: 'PushedToSageStaging'
+    };
+
+  } catch (err) {
+    try {
+      await transaction.rollback();
+    } catch (rollbackErr) {
+      console.error('Sage DIM push rollback failed:', rollbackErr);
+    }
+
+    throw err;
+  }
+}
+
 async function initDb() {
     pool = await sql.connect(config);
     console.log('Connected to SQL Server');
 }
+
+app.post('/quadient/invoice/push-to-dim-test', async (req, res) => {
+  if (!ENABLE_DIM_TEST_ENDPOINT) {
+    return res.status(404).json({
+      error: 'NOT_FOUND',
+      message: 'DIM test endpoint is disabled'
+    });
+  }
+
+  try {
+    const stagingId = req.body.stagingId ?? null;
+    const invoiceNumber = req.body.invoiceNumber ?? null;
+
+    const result = await pushQuadientInvoiceToSageDim({
+      stagingId,
+      invoiceNumber
+    });
+
+    return res.status(200).json({
+      status: 'pushed',
+      ...result
+    });
+
+  } catch (err) {
+    console.error('DIM test push failed:', err);
+
+    return res.status(err.statusCode || 500).json({
+      error: 'DIM_PUSH_FAILED',
+      message: err.message
+    });
+  }
+});
 
 app.get('/health', (req, res) => {
     res.json({ status: 'OK' });
@@ -1192,6 +1478,266 @@ app.get('/statements', async (req, res) => {
   }
 });
 
+async function runSagePendingApImport(pool, { companyId, tranNo, vendId }) {
+  const request = pool.request();
+
+  request.input('CompanyID', sql.VarChar(3), companyId);
+  request.input('TranNo', sql.VarChar(30), tranNo);
+  request.input('VendID', sql.VarChar(12), vendId);
+  request.input('UserID', sql.VarChar(5), 'admin');
+
+  request.output('SessionKey', sql.Int);
+  request.output('ResultCode', sql.Int);
+  request.output('ResultMessage', sql.VarChar(4000));
+
+  const result = await request.execute('dbo.spQuadient_RunPendingAPVoucherImport');
+
+  return {
+    sessionKey: result.output.SessionKey,
+    resultCode: result.output.ResultCode,
+    resultMessage: result.output.ResultMessage
+  };
+}
+
+async function getMigrationLogRows(pool, sessionKey) {
+  if (!sessionKey) return [];
+
+  const result = await pool.request()
+    .input('sessionKey', sql.Int, sessionKey)
+    .query(`
+      SELECT
+          EntryNo,
+          Status,
+          EntityID,
+          ColumnID,
+          ColumnValue,
+          Comment
+      FROM dbo.tdmMigrationLogWrk
+      WHERE SessionKey = @sessionKey
+      ORDER BY EntryNo;
+    `);
+
+  return result.recordset || [];
+}
+
+function formatMigrationLogRows(rows) {
+  if (!rows || rows.length === 0) {
+    return 'No rows were found in dbo.tdmMigrationLogWrk for this session.';
+  }
+
+  return rows.map(row => {
+    return [
+      `EntryNo: ${row.EntryNo}`,
+      `Status: ${row.Status || ''}`,
+      `EntityID: ${row.EntityID || ''}`,
+      `ColumnID: ${row.ColumnID || ''}`,
+      `ColumnValue: ${row.ColumnValue || ''}`,
+      `Comment: ${row.Comment || ''}`
+    ].join('\n');
+  }).join('\n\n');
+}
+
+/*
+  Replace this with your existing email-sending method if the app already has one.
+  This function intentionally does not throw back to the Quadient endpoint.
+*/
+async function emailAccountingInvoiceImportFailure({
+  stagingId,
+  invoiceNumber,
+  companyId,
+  vendorId,
+  vendId,
+  sessionKey,
+  resultCode,
+  resultMessage,
+  migrationLogRows,
+  error
+}) {
+  const subject = `Sage AP import failed for Quadient invoice ${invoiceNumber || '(unknown)'}`;
+
+  const body = `
+A Quadient invoice was received and stored successfully, but the Sage Pending AP Voucher import failed.
+
+Staging ID: ${stagingId}
+Invoice Number / TranNo: ${invoiceNumber || ''}
+Company: ${companyId || ''}
+Vendor ID: ${vendorId || vendId || ''}
+SessionKey: ${sessionKey || ''}
+ResultCode: ${resultCode ?? ''}
+ResultMessage: ${resultMessage || ''}
+
+Exception:
+${error ? (error.stack || error.message || String(error)) : 'None'}
+
+Migration Log:
+${formatMigrationLogRows(migrationLogRows)}
+`.trim();
+
+  writeLog('quadient-invoice.log', 'AP_IMPORT_FAILURE_EMAIL_BODY', {
+    to: process.env.AP_IMPORT_FAILURE_EMAIL_TO,
+    subject,
+    body
+  });
+
+  /*
+    Hook this into your existing email system.
+
+    Example with a hypothetical sendEmail helper:
+
+    await sendEmail({
+      to: process.env.AP_IMPORT_FAILURE_EMAIL_TO,
+      subject,
+      text: body
+    });
+  */
+}
+
+async function processQuadientInvoiceToSageImport({ stagingId, payload }) {
+  const invoiceNumber = cleanString(payload.invoiceNumber);
+  const companyId = cleanString(payload.companyId);
+  const vendorId = cleanString(payload.vendorId);
+
+  let dimResult = null;
+  let importResult = null;
+  let migrationLogRows = [];
+
+  try {
+    writeLog('quadient-invoice.log', 'SAGE_IMPORT_STARTED', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      vendorId
+    });
+
+    /*
+      This should be your existing function that reads QuadientInvoiceStaging /
+      QuadientInvoiceLineStaging and inserts into StgPendVoucher / StgVoucherDetl.
+
+      It should return at least:
+        {
+          tranNo: '...',
+          vendId: '...',
+          companyId: '...'
+        }
+
+      If your function already derives tranNo from invoiceNumber, that is fine.
+    */
+    dimResult = await pushQuadientInvoiceToSageDim(pool, stagingId);
+
+    importResult = await runSagePendingApImport(pool, {
+      companyId: dimResult.companyId || companyId,
+      tranNo: dimResult.tranNo,
+      vendId: dimResult.vendId || vendorId
+    });
+
+    migrationLogRows = await getMigrationLogRows(pool, importResult.sessionKey);
+
+    if (importResult.resultCode === 1) {
+      await pool.request()
+        .input('stagingId', sql.Int, stagingId)
+        .query(`
+          UPDATE dbo.QuadientInvoiceStaging
+          SET ProcessingStatus = 'Imported'
+          WHERE QuadientInvoiceStagingID = @stagingId;
+        `);
+
+      writeLog('quadient-invoice.log', 'SAGE_IMPORT_SUCCEEDED', {
+        stagingId,
+        invoiceNumber,
+        companyId: dimResult.companyId || companyId,
+        vendId: dimResult.vendId || vendorId,
+        tranNo: dimResult.tranNo,
+        sessionKey: importResult.sessionKey,
+        resultCode: importResult.resultCode,
+        resultMessage: importResult.resultMessage
+      });
+
+      return;
+    }
+
+    await pool.request()
+      .input('stagingId', sql.Int, stagingId)
+      .query(`
+        UPDATE dbo.QuadientInvoiceStaging
+        SET ProcessingStatus = 'SageImportFailed'
+        WHERE QuadientInvoiceStagingID = @stagingId;
+      `);
+
+    writeLog('quadient-invoice.log', 'SAGE_IMPORT_FAILED', {
+      stagingId,
+      invoiceNumber,
+      companyId: dimResult.companyId || companyId,
+      vendId: dimResult.vendId || vendorId,
+      tranNo: dimResult.tranNo,
+      sessionKey: importResult.sessionKey,
+      resultCode: importResult.resultCode,
+      resultMessage: importResult.resultMessage,
+      migrationLogRows
+    });
+
+    await emailAccountingInvoiceImportFailure({
+      stagingId,
+      invoiceNumber,
+      companyId: dimResult.companyId || companyId,
+      vendorId,
+      vendId: dimResult.vendId || vendorId,
+      sessionKey: importResult.sessionKey,
+      resultCode: importResult.resultCode,
+      resultMessage: importResult.resultMessage,
+      migrationLogRows
+    });
+
+  } catch (err) {
+    writeLog('quadient-invoice.log', 'SAGE_IMPORT_EXCEPTION', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      vendorId,
+      dimResult,
+      importResult,
+      message: err.message,
+      stack: err.stack
+    });
+
+    try {
+      await pool.request()
+        .input('stagingId', sql.Int, stagingId)
+        .query(`
+          UPDATE dbo.QuadientInvoiceStaging
+          SET ProcessingStatus = 'SageImportFailed'
+          WHERE QuadientInvoiceStagingID = @stagingId;
+        `);
+    } catch (statusErr) {
+      writeLog('quadient-invoice.log', 'SAGE_IMPORT_STATUS_UPDATE_FAILED', {
+        stagingId,
+        message: statusErr.message,
+        stack: statusErr.stack
+      });
+    }
+
+    try {
+      await emailAccountingInvoiceImportFailure({
+        stagingId,
+        invoiceNumber,
+        companyId,
+        vendorId,
+        sessionKey: importResult?.sessionKey,
+        resultCode: importResult?.resultCode ?? -999,
+        resultMessage: importResult?.resultMessage || err.message,
+        migrationLogRows,
+        error: err
+      });
+    } catch (emailErr) {
+      writeLog('quadient-invoice.log', 'AP_IMPORT_FAILURE_EMAIL_FAILED', {
+        stagingId,
+        invoiceNumber,
+        message: emailErr.message,
+        stack: emailErr.stack
+      });
+    }
+  }
+}
+
 app.post('/quadient/invoice', async (req, res) => {
   const payload = req.body;
 
@@ -1379,10 +1925,16 @@ app.post('/quadient/invoice', async (req, res) => {
         invoiceNumber: payload.invoiceNumber,
         vendorKey: payload.vendorKey ?? null,
         vendorId: payload.vendorId || null,
+        companyId: payload.companyId || null,
         lineCount: payload.lines.length
       });
 
-      return res.status(201).json({
+      /*
+        Respond to Quadient once we have safely accepted/stored the invoice.
+        Sage import is an internal AP process and should not make the Quadient
+        upload fail.
+      */
+      res.status(201).json({
         status: 'received',
         processingStatus: 'ReadyForDIM',
         stagingId,
@@ -1391,6 +1943,26 @@ app.post('/quadient/invoice', async (req, res) => {
         vendorId: payload.vendorId || null,
         lineCount: payload.lines.length
       });
+
+      /*
+        Start Sage import after responding to Quadient.
+        Errors are logged and emailed to AP, not returned to Quadient.
+      */
+      setImmediate(() => {
+        processQuadientInvoiceToSageImport({
+          stagingId,
+          payload
+        }).catch(err => {
+          writeLog('quadient-invoice.log', 'SAGE_IMPORT_BACKGROUND_UNHANDLED_ERROR', {
+            stagingId,
+            invoiceNumber: payload?.invoiceNumber || null,
+            message: err.message,
+            stack: err.stack
+          });
+        });
+      });
+
+      return;
 
     } catch (err) {
 
