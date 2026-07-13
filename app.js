@@ -371,7 +371,12 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
         SELECT
             LEFT(ISNULL(l.Description, ''), 40) AS Description,
 
-            CAST(ROUND(l.LineAmount, 2) AS DECIMAL(15, 2)) AS ExtAmt,
+            CAST(
+                ROUND(
+                    ISNULL(l.LineAmount, ISNULL(l.UnitCost, 0) * ISNULL(NULLIF(l.Quantity, 0), 1)),
+                    2
+                ) AS DECIMAL(15, 2)
+            ) AS ExtAmt,
 
             LEFT(ISNULL(l.Description, ''), 255) AS ExtCmnt,
 
@@ -394,7 +399,15 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
             LEFT(l.PONumber, 10) AS PONo,
             l.POLineNumber AS POLineNo,
 
-            CAST(ROUND(l.Quantity, 8) AS DECIMAL(16, 8)) AS Quantity,
+            CAST(
+                ROUND(
+                    CASE
+                        WHEN l.Quantity IS NULL OR l.Quantity = 0 THEN 1
+                        ELSE l.Quantity
+                    END,
+                    8
+                ) AS DECIMAL(16, 8)
+            ) AS Quantity,
 
             ISNULL(l.LineNumber, 1) AS SeqNo,
 
@@ -402,7 +415,15 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
             @tranNo AS TranNo,
             @tranTypeId AS TranTypeID,
 
-            CAST(ROUND(l.UnitCost, 5) AS DECIMAL(15, 5)) AS UnitCost,
+            CAST(
+                ROUND(
+                    CASE
+                        WHEN l.UnitCost IS NULL THEN l.LineAmount
+                        ELSE l.UnitCost
+                    END,
+                    2
+                ) AS DECIMAL(15, 2)
+            ) AS UnitCost,
 
             LEFT(l.UnitMeasure, 6) AS UnitMeasID,
 
