@@ -1740,6 +1740,96 @@ async function processQuadientInvoiceToSageImport({ stagingId, payload }) {
   }
 }
 
+app.post('/quadient/invoice/reprocess/:stagingId', async (req, res) => {
+  const stagingId = Number(req.params.stagingId);
+
+  if (!Number.isInteger(stagingId) || stagingId <= 0) {
+    return res.status(400).json({
+      error: 'INVALID_STAGING_ID',
+      message: 'A valid numeric stagingId is required.'
+    });
+  }
+
+  try {
+    const invoiceResult = await pool.request()
+      .input('stagingId', sql.Int, stagingId)
+      .query(`
+        SELECT
+            QuadientInvoiceStagingID,
+            InvoiceNumber,
+            VendKey,
+            VendorID,
+            CompanyID,
+            ProcessingStatus
+        FROM dbo.QuadientInvoiceStaging
+        WHERE QuadientInvoiceStagingID = @stagingId;
+      `);
+
+    if (invoiceResult.recordset.length === 0) {
+      return res.status(404).json({
+        error: 'STAGING_ROW_NOT_FOUND',
+        message: `No QuadientInvoiceStaging row found for ID ${stagingId}.`
+      });
+    }
+
+    const invoice = invoiceResult.recordset[0];
+
+    await pool.request()
+      .input('stagingId', sql.Int, stagingId)
+      .query(`
+        UPDATE dbo.QuadientInvoiceStaging
+        SET ProcessingStatus = 'ReadyForDIM'
+        WHERE QuadientInvoiceStagingID = @stagingId;
+      `);
+
+    writeLog('quadient-invoice.log', 'MANUAL_REPROCESS_STARTED', {
+      stagingId,
+      invoiceNumber: invoice.InvoiceNumber,
+      vendorId: invoice.VendorID,
+      companyId: invoice.CompanyID
+    });
+
+    setImmediate(() => {
+      processQuadientInvoiceToSageImport({
+        stagingId,
+        payload: {
+          invoiceNumber: invoice.InvoiceNumber,
+          vendorKey: invoice.VendKey,
+          vendorId: invoice.VendorID,
+          companyId: invoice.CompanyID
+        }
+      }).catch(err => {
+        writeLog('quadient-invoice.log', 'MANUAL_REPROCESS_UNHANDLED_ERROR', {
+          stagingId,
+          invoiceNumber: invoice.InvoiceNumber,
+          message: err.message,
+          stack: err.stack
+        });
+      });
+    });
+
+    return res.status(202).json({
+      status: 'reprocess_started',
+      stagingId,
+      invoiceNumber: invoice.InvoiceNumber,
+      vendorId: invoice.VendorID,
+      companyId: invoice.CompanyID
+    });
+
+  } catch (err) {
+    writeLog('quadient-invoice.log', 'MANUAL_REPROCESS_FAILED_TO_START', {
+      stagingId,
+      message: err.message,
+      stack: err.stack
+    });
+
+    return res.status(500).json({
+      error: 'MANUAL_REPROCESS_FAILED_TO_START',
+      message: err.message
+    });
+  }
+});
+
 app.post('/quadient/invoice', async (req, res) => {
   const payload = req.body;
 
