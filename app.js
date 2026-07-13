@@ -371,7 +371,7 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
         SELECT
             LEFT(ISNULL(l.Description, ''), 40) AS Description,
 
-            CAST(ROUND(l.LineAmount, 2) AS DECIMAL(15, 2)) AS ExtAmt
+            CAST(ROUND(l.LineAmount, 2) AS DECIMAL(15, 2)) AS ExtAmt,
 
             LEFT(ISNULL(l.Description, ''), 255) AS ExtCmnt,
 
