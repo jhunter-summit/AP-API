@@ -45,7 +45,7 @@ const config = {
 const crypto = require('crypto');
 
 const SAGE_DIM_TRAN_TYPE_ID = process.env.SAGE_DIM_TRAN_TYPE_ID || 'IN';
-const SAGE_DIM_PO_MATCH_STATUS = process.env.SAGE_DIM_PO_MATCH_STATUS || 'Matched';
+const SAGE_DIM_PO_MATCH_STATUS = Number(process.env.SAGE_DIM_PO_MATCH_STATUS || 2);
 const ENABLE_DIM_TEST_ENDPOINT = process.env.ENABLE_DIM_TEST_ENDPOINT === 'true';
 
 let pool;
@@ -346,7 +346,7 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
       .input('sessionKey', sql.Int, sessionKey)
       .input('tranNo', sql.VarChar(15), tranNo)
       .input('tranTypeId', sql.VarChar(2), tranTypeId)
-      .input('poMatchedStatus', sql.VarChar(25), poMatchedStatus)
+      .input('poMatchedStatus', sql.Int, SAGE_DIM_PO_MATCH_STATUS)
       .query(`
         INSERT INTO dbo.StgVoucherDetl (
             Description,
@@ -392,8 +392,8 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
             LEFT(l.ItemID, 30) AS ItemID,
 
             CASE
-                WHEN l.LineType = 'PO_MATCHED' THEN @poMatchedStatus
-                ELSE NULL
+                WHEN l.LineType = 'PO_MATCHED' THEN 2
+                ELSE 1
             END AS MatchStatus,
 
             LEFT(l.PONumber, 10) AS PONo,
