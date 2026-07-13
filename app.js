@@ -365,6 +365,8 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
             UnitCost,
             UnitMeasID,
             ProcessStatus,
+            STaxSchdID,
+            STaxClassID,
             SessionKey
         )
         OUTPUT INSERTED.RowKey AS voucherDetailRowKey
@@ -428,6 +430,8 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
             LEFT(l.UnitMeasure, 6) AS UnitMeasID,
 
             0 AS ProcessStatus,
+            '001' AS STaxSchdID,
+            'Nontaxable' AS STaxClassID,
             @sessionKey AS SessionKey
         FROM dbo.QuadientInvoiceLineStaging l
         INNER JOIN dbo.QuadientInvoiceStaging h
