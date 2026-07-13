@@ -50,6 +50,33 @@ const ENABLE_DIM_TEST_ENDPOINT = process.env.ENABLE_DIM_TEST_ENDPOINT === 'true'
 
 let pool;
 
+const nodemailer = require('nodemailer');
+
+function createMailTransporter() {
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: String(process.env.SMTP_SECURE || 'false').toLowerCase() === 'true',
+    auth: process.env.SMTP_USER
+      ? {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS
+        }
+      : undefined
+  });
+}
+
+async function sendEmail({ to, subject, text }) {
+  const transporter = createMailTransporter();
+
+  return transporter.sendMail({
+    from: process.env.AP_IMPORT_FAILURE_EMAIL_FROM || process.env.SMTP_USER,
+    to,
+    subject,
+    text
+  });
+}
+
 console.log({
   server: config.server,
   database: config.database,
@@ -1584,15 +1611,17 @@ ${formatMigrationLogRows(migrationLogRows)}
 
     Example with a hypothetical sendEmail helper:
 
-    await sendEmail({
-      to: process.env.AP_IMPORT_FAILURE_EMAIL_TO,
-      subject,
-      text: body
-    });
+  await sendEmail({
+    to: process.env.AP_IMPORT_FAILURE_EMAIL_TO,
+    subject,
+    text: body
+  });
   */
 }
 
 async function processQuadientInvoiceToSageImport({ stagingId, payload }) {
+  console.log(`Processing Quadient invoice staging ID ${stagingId} for Sage import...`);
+  console.log('Payload:', payload);
   const invoiceNumber = cleanString(payload.invoiceNumber);
   const companyId = cleanString(payload.companyId);
   const vendorId = cleanString(payload.vendorId);
