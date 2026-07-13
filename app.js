@@ -213,6 +213,11 @@ function validateQuadientInvoice(payload) {
 }
 
 async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
+  writeLog('quadient-invoice.log', 'PUSH_DIM_FUNCTION_ENTERED', {
+    args: arguments.length,
+    stagingId: stagingId || null,
+    invoiceNumber: invoiceNumber || null
+  });
   if (!stagingId && !invoiceNumber) {
     const err = new Error('Either stagingId or invoiceNumber is required');
     err.statusCode = 400;
@@ -1651,7 +1656,7 @@ async function processQuadientInvoiceToSageImport({ stagingId, payload }) {
 
       If your function already derives tranNo from invoiceNumber, that is fine.
     */
-    dimResult = await pushQuadientInvoiceToSageDim(pool, {
+    dimResult = await pushQuadientInvoiceToSageDim({
       stagingId
     });
 
