@@ -1622,7 +1622,9 @@ async function processQuadientInvoiceToSageImport({ stagingId, payload }) {
 
       If your function already derives tranNo from invoiceNumber, that is fine.
     */
-    dimResult = await pushQuadientInvoiceToSageDim(pool, stagingId);
+    dimResult = await pushQuadientInvoiceToSageDim(pool, {
+      stagingId
+    });
 
     importResult = await runSagePendingApImport(pool, {
       companyId: dimResult.companyId || companyId,
