@@ -1892,6 +1892,43 @@ app.post('/quadient/invoice/reprocess/:stagingId', async (req, res) => {
 app.post('/quadient/invoice', async (req, res) => {
   let payload = req.body;
 
+  const duplicateResult = await pool.request()
+  .input('companyId', sql.NVarChar(10), cleanString(payload.companyId))
+  .input('vendorId', sql.NVarChar(50), cleanString(payload.vendorId))
+  .input('invoiceNumber', sql.NVarChar(50), cleanString(payload.invoiceNumber))
+  .query(`
+    SELECT TOP 1
+        QuadientInvoiceStagingID,
+        ProcessingStatus,
+        CreatedAt
+    FROM dbo.QuadientInvoiceStaging WITH (UPDLOCK, HOLDLOCK)
+    WHERE CompanyID = @companyId
+      AND VendorID = @vendorId
+      AND InvoiceNumber = @invoiceNumber
+    ORDER BY QuadientInvoiceStagingID DESC;
+  `);
+
+  if (duplicateResult.recordset.length > 0) {
+    const existing = duplicateResult.recordset[0];
+
+    writeLog('quadient-invoice.log', 'DUPLICATE_INVOICE_REJECTED', {
+      invoiceNumber: payload.invoiceNumber,
+      companyId: payload.companyId,
+      vendorId: payload.vendorId,
+      existingStagingId: existing.QuadientInvoiceStagingID,
+      existingProcessingStatus: existing.ProcessingStatus,
+      existingCreatedAt: existing.CreatedAt
+    });
+
+    return res.status(409).json({
+      error: 'DUPLICATE_INVOICE',
+      message: 'Invoice has already been received for this company/vendor/invoice number.',
+      existingStagingId: existing.QuadientInvoiceStagingID,
+      processingStatus: existing.ProcessingStatus,
+      createdAt: existing.CreatedAt
+    });
+  }
+
   if (Array.isArray(payload)) {
     if (payload.length !== 1) {
       writeLog('quadient-invoice.log', 'INVOICE_PAYLOAD_ARRAY_REJECTED', {
