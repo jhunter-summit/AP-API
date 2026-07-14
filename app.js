@@ -1892,6 +1892,16 @@ app.post('/quadient/invoice/reprocess/:stagingId', async (req, res) => {
 app.post('/quadient/invoice', async (req, res) => {
   let payload = req.body;
 
+  writeLog('quadient-invoice.log', 'DUPLICATE_CHECK_STARTED', {
+    invoiceNumber: payload.invoiceNumber || null,
+    companyId: payload.companyId || null,
+    vendorId: payload.vendorId || null,
+    vendorKey: payload.vendorKey || null,
+    normalizedInvoiceNumber: cleanString(payload.invoiceNumber),
+    normalizedCompanyId: cleanString(payload.companyId),
+    normalizedVendorId: cleanString(payload.vendorId)
+  });
+
   const duplicateResult = await pool.request()
   .input('companyId', sql.NVarChar(10), cleanString(payload.companyId))
   .input('vendorId', sql.NVarChar(50), cleanString(payload.vendorId))
