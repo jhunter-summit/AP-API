@@ -1890,17 +1890,28 @@ app.post('/quadient/invoice/reprocess/:stagingId', async (req, res) => {
 });
 
 app.post('/quadient/invoice', async (req, res) => {
-  const payload = req.body;
+  let payload = req.body;
 
-  writeLog('quadient-invoice.log', 'INVOICE_POST_RECEIVED', {
-    invoiceNumber: payload?.invoiceNumber || null,
-    vendorKey: payload?.vendorKey || null,
-    vendorId: payload?.vendorId || null,
-    companyId: payload?.companyId || null,
-    totalAmount: payload?.totalAmount || null,
-    lineCount: Array.isArray(payload?.lines) ? payload.lines.length : null,
-    payload
-  });
+  if (Array.isArray(payload)) {
+    if (payload.length !== 1) {
+      writeLog('quadient-invoice.log', 'INVOICE_PAYLOAD_ARRAY_REJECTED', {
+        arrayLength: payload.length
+      });
+
+      return res.status(400).json({
+        error: 'VALIDATION_FAILED',
+        message: 'Expected a single invoice object or an array containing exactly one invoice',
+        details: [`Received array with ${payload.length} invoices`]
+      });
+    }
+
+    payload = payload[0];
+
+    writeLog('quadient-invoice.log', 'INVOICE_PAYLOAD_ARRAY_UNWRAPPED', {
+      arrayLength: 1,
+      invoiceNumber: payload.invoiceNumber || null
+    });
+  }
 
   try {
     const validationErrors = validateQuadientInvoice(payload);
