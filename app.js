@@ -1938,6 +1938,13 @@ app.post('/quadient/invoice', async (req, res) => {
       createdAt: existing.CreatedAt
     });
   }
+  writeLog('quadient-invoice.log', 'DUPLICATE_CHECK_RESULT', {
+    invoiceNumber: cleanString(payload.invoiceNumber),
+    companyId: cleanString(payload.companyId),
+    vendorId: cleanString(payload.vendorId),
+    duplicateCount: duplicateResult.recordset.length,
+    duplicateRows: duplicateResult.recordset
+  });
 
   if (Array.isArray(payload)) {
     if (payload.length !== 1) {
