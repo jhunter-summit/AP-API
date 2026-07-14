@@ -1903,20 +1903,24 @@ app.post('/quadient/invoice', async (req, res) => {
   });
 
   const duplicateResult = await pool.request()
-  .input('companyId', sql.NVarChar(10), cleanString(payload.companyId))
-  .input('vendorId', sql.NVarChar(50), cleanString(payload.vendorId))
-  .input('invoiceNumber', sql.NVarChar(50), cleanString(payload.invoiceNumber))
-  .query(`
-    SELECT TOP 1
-        QuadientInvoiceStagingID,
-        ProcessingStatus,
-        CreatedAt
-    FROM dbo.QuadientInvoiceStaging WITH (UPDLOCK, HOLDLOCK)
-    WHERE CompanyID = @companyId
-      AND VendorID = @vendorId
-      AND InvoiceNumber = @invoiceNumber
-    ORDER BY QuadientInvoiceStagingID DESC;
-  `);
+    .input('companyId', sql.NVarChar(10), cleanString(payload.companyId))
+    .input('vendorId', sql.NVarChar(50), cleanString(payload.vendorId))
+    .input('invoiceNumber', sql.NVarChar(50), cleanString(payload.invoiceNumber))
+    .query(`
+      SELECT TOP 1
+          QuadientInvoiceStagingID,
+          InvoiceNumber,
+          CompanyID,
+          VendorID,
+          VendKey,
+          ProcessingStatus,
+          CreatedAt
+      FROM dbo.QuadientInvoiceStaging WITH (UPDLOCK, HOLDLOCK)
+      WHERE UPPER(LTRIM(RTRIM(CompanyID))) = UPPER(LTRIM(RTRIM(@companyId)))
+        AND UPPER(LTRIM(RTRIM(VendorID))) = UPPER(LTRIM(RTRIM(@vendorId)))
+        AND UPPER(LTRIM(RTRIM(InvoiceNumber))) = UPPER(LTRIM(RTRIM(@invoiceNumber)))
+      ORDER BY QuadientInvoiceStagingID DESC;
+    `);
 
   if (duplicateResult.recordset.length > 0) {
     const existing = duplicateResult.recordset[0];
