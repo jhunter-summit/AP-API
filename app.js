@@ -287,11 +287,13 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
 
     // Header insert: QuadientInvoiceStaging -> StgPendVoucher
     const headerRequest = new sql.Request(transaction);
+    const vouchNo = `Q${String(stagingId).padStart(9, '0')}`;
 
     const headerResult = await headerRequest
       .input('stagingId', sql.Int, resolvedStagingId)
       .input('sessionKey', sql.Int, sessionKey)
       .input('tranNo', sql.VarChar(15), tranNo)
+      .input('vouchNo', sql.VarChar(10), vouchNo)
       .input('tranTypeId', sql.VarChar(2), tranTypeId)
       .query(`
         INSERT INTO dbo.StgPendVoucher (
@@ -307,6 +309,7 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
             TranNo,
             TranTypeID,
             VendID,
+            vouchNo,
             ProcessStatus,
             SessionKey
         )
@@ -324,6 +327,7 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
             @tranNo AS TranNo,
             @tranTypeId AS TranTypeID,
             LEFT(h.VendorID, 12) AS VendID,
+            @vouchNo AS VouchNo,
             0 AS ProcessStatus,
             @sessionKey AS SessionKey
         FROM dbo.QuadientInvoiceStaging h
@@ -1913,7 +1917,7 @@ app.post('/quadient/invoice', async (req, res) => {
     });
   }
 
-    writeLog('quadient-invoice.log', 'DUPLICATE_CHECK_STARTED', {
+  writeLog('quadient-invoice.log', 'DUPLICATE_CHECK_STARTED', {
     invoiceNumber: payload.invoiceNumber || null,
     companyId: payload.companyId || null,
     vendorId: payload.vendorId || null,
