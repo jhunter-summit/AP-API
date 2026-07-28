@@ -53,25 +53,29 @@ let pool;
 const nodemailer = require('nodemailer');
 
 function createMailTransporter() {
+  if (!process.env.SMTP_HOST) {
+    throw new Error('SMTP_HOST is not configured');
+  }
+
   return nodemailer.createTransport({
     host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 587),
+    port: Number(process.env.SMTP_PORT || 25),
     secure: String(process.env.SMTP_SECURE || 'false').toLowerCase() === 'true',
-    auth: process.env.SMTP_USER
-      ? {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS
-        }
-      : undefined
+    tls: {
+      // Common for internal relays. Remove this if IT requires strict cert validation.
+      rejectUnauthorized: false
+    }
   });
 }
 
-async function sendEmail({ to, subject, text }) {
+async function sendEmail({ to, cc, subject, text }) {
   const transporter = createMailTransporter();
 
   return transporter.sendMail({
-    from: process.env.AP_IMPORT_FAILURE_EMAIL_FROM || process.env.SMTP_USER,
-    to,
+    from: process.env.AP_IMPORT_FAILURE_EMAIL_FROM,
+    to: process.env.AP_IMPORT_FAILURE_EMAIL_TO,
+    cc: process.env.AP_IMPORT_FAILURE_EMAIL_CC,
+
     subject,
     text
   });
@@ -1607,50 +1611,85 @@ async function emailAccountingInvoiceImportFailure({
   invoiceNumber,
   companyId,
   vendorId,
-  vendId,
   sessionKey,
   resultCode,
   resultMessage,
   migrationLogRows,
   error
 }) {
-  const subject = `Sage AP import failed for Quadient invoice ${invoiceNumber || '(unknown)'}`;
+  const to = process.env.AP_IMPORT_FAILURE_EMAIL_TO;
+  const cc = process.env.AP_IMPORT_FAILURE_EMAIL_CC || undefined;
+  if (!to) {
+    writeLog('quadient-invoice.log', 'AP_IMPORT_FAILURE_EMAIL_SKIPPED', {
+      reason: 'AP_IMPORT_FAILURE_EMAIL_TO is not configured',
+      stagingId,
+      invoiceNumber
+    });
+    return;
+  }
 
-  const body = `
-A Quadient invoice was received and stored successfully, but the Sage Pending AP Voucher import failed.
+  const migrationLogText =
+    migrationLogRows && migrationLogRows.length > 0
+      ? migrationLogRows.map(row =>
+          [
+            `EntryNo: ${row.EntryNo ?? ''}`,
+            `Status: ${row.Status ?? ''}`,
+            `EntityID: ${row.EntityID ?? ''}`,
+            `ColumnID: ${row.ColumnID ?? ''}`,
+            `ColumnValue: ${row.ColumnValue ?? ''}`,
+            `Comment: ${row.Comment ?? ''}`
+          ].join('\n')
+        ).join('\n\n')
+      : 'No rows were found in dbo.tdmMigrationLogWrk for this session.';
 
-Staging ID: ${stagingId}
-Invoice Number / TranNo: ${invoiceNumber || ''}
-Company: ${companyId || ''}
-Vendor ID: ${vendorId || vendId || ''}
-SessionKey: ${sessionKey || ''}
-ResultCode: ${resultCode ?? ''}
-ResultMessage: ${resultMessage || ''}
+  const subject = `Sage AP import failed for Quadient invoice ${invoiceNumber || stagingId}`;
 
-Exception:
-${error ? (error.stack || error.message || String(error)) : 'None'}
-
-Migration Log:
-${formatMigrationLogRows(migrationLogRows)}
-`.trim();
+  const body = [
+    'A Quadient invoice was received and stored successfully, but the Sage Pending AP Voucher import failed.',
+    '',
+    `Staging ID: ${stagingId || ''}`,
+    `Invoice Number / TranNo: ${invoiceNumber || ''}`,
+    `Company: ${companyId || ''}`,
+    `Vendor ID: ${vendorId || ''}`,
+    `SessionKey: ${sessionKey || ''}`,
+    `ResultCode: ${resultCode ?? ''}`,
+    `ResultMessage: ${resultMessage || ''}`,
+    '',
+    'Migration Log:',
+    migrationLogText,
+    '',
+    error ? 'Exception:' : '',
+    error ? (error.stack || error.message || String(error)) : ''
+  ].filter(line => line !== '').join('\n');
 
   writeLog('quadient-invoice.log', 'AP_IMPORT_FAILURE_EMAIL_BODY', {
-    to: process.env.AP_IMPORT_FAILURE_EMAIL_TO,
+    to,
+    cc,
     subject,
     body
   });
 
-  /*
-    Hook this into your existing email system.
+  try {
+    const mailResult = await sendEmail({
+      to,
+      cc,
+      subject,
+      text: body
+    });
 
-    Example with a hypothetical sendEmail helper:
-
-  await sendEmail({
-    to: process.env.AP_IMPORT_FAILURE_EMAIL_TO,
-    subject,
-    text: body
-  });
-  */
+    writeLog('quadient-invoice.log', 'AP_IMPORT_FAILURE_EMAIL_SENT', {
+      stagingId,
+      invoiceNumber,
+      messageId: mailResult.messageId || null
+    });
+  } catch (mailErr) {
+    writeLog('quadient-invoice.log', 'AP_IMPORT_FAILURE_EMAIL_FAILED', {
+      stagingId,
+      invoiceNumber,
+      message: mailErr.message,
+      stack: mailErr.stack
+    });
+  }
 }
 
 async function processQuadientInvoiceToSageImport({ stagingId, payload }) {
@@ -1888,6 +1927,37 @@ app.post('/quadient/invoice/reprocess/:stagingId', async (req, res) => {
 
     return res.status(500).json({
       error: 'MANUAL_REPROCESS_FAILED_TO_START',
+      message: err.message
+    });
+  }
+});
+
+app.post('/quadient/test-error-email', async (req, res) => {
+  try {
+    await emailAccountingInvoiceImportFailure({
+      stagingId: 999999,
+      invoiceNumber: 'TEST-EMAIL',
+      companyId: 'ANA',
+      vendorId: 'TESTVEND',
+      sessionKey: 12345,
+      resultCode: -1,
+      resultMessage: 'This is a test Sage AP import failure email.',
+      migrationLogRows: [
+        {
+          EntryNo: 1,
+          Status: 'Failure',
+          EntityID: 'TEST-EMAIL - IN',
+          ColumnID: 'GLAcctNo',
+          ColumnValue: '',
+          Comment: 'Test failure message'
+        }
+      ]
+    });
+
+    res.json({ status: 'sent' });
+  } catch (err) {
+    res.status(500).json({
+      error: 'EMAIL_TEST_FAILED',
       message: err.message
     });
   }
