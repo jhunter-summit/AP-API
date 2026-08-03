@@ -216,7 +216,7 @@ function validateQuadientInvoice(payload) {
   return errors;
 }
 
-async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
+async function pushQuadientInvoiceToSageDim({stagingId, invoiceNumber, sessionKeyOverride = null}) {
   writeLog('quadient-invoice.log', 'PUSH_DIM_FUNCTION_ENTERED', {
     args: arguments.length,
     stagingId: stagingId || null,
@@ -228,7 +228,7 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
     throw err;
   }
 
-  const sessionKey = crypto.randomInt(1, 2147483647);
+  const sessionKey = sessionKeyOverride || Math.floor(Math.random() * 1000000);
   const tranTypeId = SAGE_DIM_TRAN_TYPE_ID;
   const poMatchedStatus = SAGE_DIM_PO_MATCH_STATUS;
 
@@ -291,7 +291,8 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
 
     // Header insert: QuadientInvoiceStaging -> StgPendVoucher
     const headerRequest = new sql.Request(transaction);
-    const vouchNo = `Q${String(stagingId).padStart(9, '0')}`;
+    //const vouchNo = `Q${String(stagingId).padStart(9, '0')}`;
+    const vouchNo = `Q${String(resolvedStagingId).padStart(9, '0')}`;
 
     const headerResult = await headerRequest
       .input('stagingId', sql.Int, resolvedStagingId)
@@ -402,7 +403,7 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
             LEFT(l.ItemID, 30) AS ItemID,
 
             CASE
-                WHEN l.LineType = 'PO_MATCHED' THEN 2
+                WHEN l.LineType = 'PO_MATCHED' THEN @poMatchedStatus
                 ELSE 1
             END AS MatchStatus,
 
@@ -412,7 +413,13 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
             CAST(
                 ROUND(
                     CASE
-                        WHEN l.Quantity IS NULL OR l.Quantity = 0 THEN 1
+                        WHEN l.LineAmount < 0
+                            AND (l.Quantity IS NULL OR l.Quantity = 0)
+                        THEN -1
+
+                        WHEN l.Quantity IS NULL OR l.Quantity = 0
+                        THEN 1
+
                         ELSE l.Quantity
                     END,
                     8
@@ -428,8 +435,14 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
             CAST(
                 ROUND(
                     CASE
-                        WHEN l.UnitCost IS NULL THEN l.LineAmount
-                        ELSE l.UnitCost
+                        WHEN l.LineAmount < 0
+                            AND (l.UnitCost IS NULL OR l.UnitCost = 0)
+                        THEN ABS(l.LineAmount)
+
+                        WHEN l.UnitCost IS NULL
+                        THEN ABS(l.LineAmount)
+
+                        ELSE ABS(l.UnitCost)
                     END,
                     2
                 ) AS DECIMAL(15, 2)
@@ -497,6 +510,598 @@ async function pushQuadientInvoiceToSageDim({ stagingId, invoiceNumber }) {
 
     throw err;
   }
+}
+
+async function createSageMigrationSession(pool, { companyId, userId = 'admin' }) {
+  const setupStepKey = 2200900;
+
+  const result = await pool.request()
+    .input('companyId', sql.VarChar(3), companyId)
+    .input('setupStepKey', sql.Int, setupStepKey)
+    .input('userId', sql.VarChar(5), userId)
+    .query(`
+      DECLARE @SessionKey INT;
+
+      SELECT TOP 1 @SessionKey = MigrateSessionKey
+      FROM dbo.tsmMigrateSession
+      WHERE CompanyID = @companyId
+        AND LastCompProcessTime IS NOT NULL
+        AND SetupStepKey = @setupStepKey
+        AND UserID = @userId
+      ORDER BY MigrateSessionKey DESC;
+
+      IF @SessionKey IS NULL
+      BEGIN
+          EXEC dbo.spGetNextSurrogateKey 'tsmMigrateSession', @SessionKey OUTPUT;
+
+          INSERT INTO dbo.tsmMigrateSession
+          (
+              MigrateSessionKey,
+              CompanyID,
+              LastCompProcessMode,
+              LastCompProcessNo,
+              LastCompProcessTime,
+              SetupStepKey,
+              StartTime,
+              UserID
+          )
+          VALUES
+          (
+              @SessionKey,
+              @companyId,
+              1,
+              0,
+              NULL,
+              @setupStepKey,
+              GETDATE(),
+              @userId
+          );
+      END
+      ELSE
+      BEGIN
+          UPDATE dbo.tsmMigrateSession
+          SET LastCompProcessMode = 1,
+              LastCompProcessNo = 0,
+              LastCompProcessTime = NULL,
+              StartTime = GETDATE()
+          WHERE MigrateSessionKey = @SessionKey
+            AND UserID = @userId;
+      END;
+
+      DELETE FROM dbo.tsmMigrateStepParamValue
+      WHERE MigrateSessionKey = @SessionKey;
+
+      SELECT @SessionKey AS SessionKey;
+    `);
+
+  return result.recordset[0].SessionKey;
+}
+
+async function runSagePendingApSessionImport(pool, { companyId, sessionKey }) {
+  const request = pool.request();
+
+  request.input('CompanyID', sql.VarChar(3), companyId);
+  request.input('SessionKey', sql.Int, sessionKey);
+  request.input('UserID', sql.VarChar(5), 'admin');
+  request.output('ResultCode', sql.Int);
+  request.output('ResultMessage', sql.VarChar(4000));
+
+  const result = await request.execute('dbo.spQuadient_RunPendingAPVoucherSessionImport');
+
+  return {
+    sessionKey,
+    resultCode: result.output.ResultCode,
+    resultMessage: result.output.ResultMessage
+  };
+}
+
+let batchImportRunning = false;
+
+app.post('/quadient/invoice/import-ready-batches', async (req, res) => {
+  if (batchImportRunning) {
+    return res.status(409).json({
+      error: 'BATCH_IMPORT_ALREADY_RUNNING',
+      message: 'A Quadient Sage import batch is already running.'
+    });
+  }
+
+  batchImportRunning = true;
+
+  try {
+    const result = await importReadyQuadientInvoiceBatches({
+      batchSize: Number(req.query.batchSize || 100)
+    });
+
+    return res.json({
+      status: 'completed',
+      ...result
+    });
+  } catch (err) {
+    writeLog('quadient-invoice.log', 'IMPORT_READY_BATCHES_FAILED', {
+      message: err.message,
+      stack: err.stack
+    });
+
+    return res.status(500).json({
+      error: 'IMPORT_READY_BATCHES_FAILED',
+      message: err.message
+    });
+  } finally {
+    batchImportRunning = false;
+  }
+});
+
+async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
+  writeLog('quadient-invoice.log', 'IMPORT_READY_BATCHES_STARTED', {
+    batchSize
+  });
+
+  const readyResult = await pool.request()
+    .input('batchSize', sql.Int, batchSize)
+    .query(`
+      SELECT TOP (@batchSize)
+          QuadientInvoiceStagingID,
+          InvoiceNumber,
+          CompanyID,
+          VendorID,
+          VendKey,
+          TotalAmount,
+          ProcessingStatus,
+          CreatedAt
+      FROM dbo.QuadientInvoiceStaging
+      WHERE ProcessingStatus = 'ReadyForDIM'
+      ORDER BY CompanyID, CreatedAt, QuadientInvoiceStagingID;
+    `);
+
+  const readyInvoices = readyResult.recordset;
+
+  if (readyInvoices.length === 0) {
+    writeLog('quadient-invoice.log', 'IMPORT_READY_BATCHES_NONE_FOUND', {});
+    return {
+      totalReady: 0,
+      companyBatchCount: 0,
+      importedCount: 0,
+      failedCount: 0,
+      companyResults: []
+    };
+  }
+
+  const groups = new Map();
+
+  for (const invoice of readyInvoices) {
+    const companyId = String(invoice.CompanyID || '').trim();
+
+    if (!companyId) {
+      await markQuadientInvoiceFailed({
+        stagingId: invoice.QuadientInvoiceStagingID,
+        status: 'DIMStagingFailed',
+        message: 'CompanyID is blank; cannot batch import invoice.'
+      });
+      continue;
+    }
+
+    if (!groups.has(companyId)) {
+      groups.set(companyId, []);
+    }
+
+    groups.get(companyId).push(invoice);
+  }
+
+  const companyResults = [];
+  let importedCount = 0;
+  let failedCount = 0;
+
+  for (const [companyId, invoices] of groups.entries()) {
+    const companyResult = await importReadyQuadientInvoiceBatchForCompany({
+      companyId,
+      invoices
+    });
+
+    importedCount += companyResult.importedCount;
+    failedCount += companyResult.failedCount;
+    companyResults.push(companyResult);
+  }
+
+  const result = {
+    totalReady: readyInvoices.length,
+    companyBatchCount: companyResults.length,
+    importedCount,
+    failedCount,
+    companyResults
+  };
+
+  writeLog('quadient-invoice.log', 'IMPORT_READY_BATCHES_COMPLETED', result);
+
+  return result;
+}
+
+async function importReadyQuadientInvoiceBatchForCompany({ companyId, invoices }) {
+  writeLog('quadient-invoice.log', 'COMPANY_BATCH_STARTED', {
+    companyId,
+    invoiceCount: invoices.length,
+    stagingIds: invoices.map(i => i.QuadientInvoiceStagingID)
+  });
+
+  const sessionKey = await createSageMigrationSession(pool, {
+    companyId,
+    userId: 'admin'
+  });
+
+  writeLog('quadient-invoice.log', 'COMPANY_BATCH_SESSION_CREATED', {
+    companyId,
+    sessionKey,
+    invoiceCount: invoices.length
+  });
+
+  let pushedCount = 0;
+  let importedCount = 0;
+  let failedCount = 0;
+  const invoiceResults = [];
+
+  for (const invoice of invoices) {
+    const stagingId = invoice.QuadientInvoiceStagingID;
+
+    try {
+      await markQuadientInvoiceRunning({
+        stagingId,
+        sessionKey,
+        message: `Starting Sage batch import. CompanyID=${companyId}; SessionKey=${sessionKey}`
+      });
+
+      const dimResult = await pushQuadientInvoiceToSageDim({
+        stagingId,
+        invoiceNumber: invoice.InvoiceNumber,
+        sessionKeyOverride: sessionKey
+      });
+
+      pushedCount++;
+
+      invoiceResults.push({
+        stagingId,
+        invoiceNumber: invoice.InvoiceNumber,
+        tranNo: dimResult.tranNo,
+        vouchNo: `Q${String(stagingId).padStart(9, '0')}`,
+        pushed: true,
+        imported: false,
+        failed: false
+      });
+
+    } catch (err) {
+      failedCount++;
+
+      await markQuadientInvoiceFailed({
+        stagingId,
+        status: 'DIMStagingFailed',
+        message: `Failed to push invoice to Sage staging. ${err.message}`
+      });
+
+      writeLog('quadient-invoice.log', 'COMPANY_BATCH_DIM_PUSH_FAILED', {
+        companyId,
+        sessionKey,
+        stagingId,
+        invoiceNumber: invoice.InvoiceNumber,
+        message: err.message,
+        stack: err.stack
+      });
+
+      await emailAccountingInvoiceImportFailure({
+        stagingId,
+        invoiceNumber: invoice.InvoiceNumber,
+        companyId,
+        vendorId: invoice.VendorID,
+        sessionKey,
+        resultCode: -100,
+        resultMessage: `Failed to push invoice to Sage staging. ${err.message}`,
+        migrationLogRows: [],
+        error: err
+      });
+    }
+  }
+
+  if (pushedCount === 0) {
+    return {
+      companyId,
+      sessionKey,
+      invoiceCount: invoices.length,
+      pushedCount,
+      importedCount,
+      failedCount,
+      resultCode: -1,
+      resultMessage: 'No invoices were pushed to Sage staging for this company batch.',
+      invoices: invoiceResults
+    };
+  }
+
+  const importResult = await runSagePendingApSessionImport(pool, {
+    companyId,
+    sessionKey
+  });
+
+  writeLog('quadient-invoice.log', 'COMPANY_BATCH_SAGE_IMPORT_RESULT', {
+    companyId,
+    sessionKey,
+    resultCode: importResult.resultCode,
+    resultMessage: importResult.resultMessage
+  });
+
+  for (const result of invoiceResults) {
+    if (!result.pushed) {
+      continue;
+    }
+
+    const voucherCheck = await verifySageVoucherCreated({
+      companyId,
+      tranNo: result.tranNo,
+      vouchNo: result.vouchNo
+    });
+
+    if (voucherCheck) {
+      importedCount++;
+
+      await markQuadientInvoiceImported({
+        stagingId: result.stagingId,
+        sessionKey,
+        voucherKey: voucherCheck.VoucherKey,
+        tranId: voucherCheck.TranID,
+        message: `Sage voucher created. VoucherKey=${voucherCheck.VoucherKey}; TranID=${voucherCheck.TranID || ''}; SessionKey=${sessionKey}`
+      });
+
+      result.imported = true;
+      result.voucherKey = voucherCheck.VoucherKey;
+      result.tranId = voucherCheck.TranID || null;
+
+    } else {
+      failedCount++;
+
+      const migrationLogRows = await getMigrationLogRowsForInvoice({
+        sessionKey,
+        tranNo: result.tranNo
+      });
+
+      const failureMessage =
+        migrationLogRows.length > 0
+          ? migrationLogRows.map(r => r.Comment).filter(Boolean).join(' | ')
+          : `Sage import did not create a voucher. SessionKey=${sessionKey}; TranNo=${result.tranNo}; VouchNo=${result.vouchNo}`;
+
+      await markQuadientInvoiceFailed({
+        stagingId: result.stagingId,
+        status: 'SageImportFailed',
+        message: failureMessage
+      });
+
+      await emailAccountingInvoiceImportFailure({
+        stagingId: result.stagingId,
+        invoiceNumber: result.invoiceNumber,
+        companyId,
+        vendorId: invoices.find(i => i.QuadientInvoiceStagingID === result.stagingId)?.VendorID || null,
+        sessionKey,
+        resultCode: importResult.resultCode,
+        resultMessage: failureMessage,
+        migrationLogRows
+      });
+
+      writeLog('quadient-invoice.log', 'COMPANY_BATCH_INVOICE_IMPORT_FAILED', {
+        companyId,
+        sessionKey,
+        stagingId: result.stagingId,
+        invoiceNumber: result.invoiceNumber,
+        tranNo: result.tranNo,
+        vouchNo: result.vouchNo,
+        failureMessage
+      });
+
+      result.failed = true;
+      result.failureMessage = failureMessage;
+    }
+  }
+
+  const companyResult = {
+    companyId,
+    sessionKey,
+    invoiceCount: invoices.length,
+    pushedCount,
+    importedCount,
+    failedCount,
+    resultCode: importResult.resultCode,
+    resultMessage: importResult.resultMessage,
+    invoices: invoiceResults
+  };
+
+  writeLog('quadient-invoice.log', 'COMPANY_BATCH_COMPLETED', companyResult);
+
+  return companyResult;
+}
+
+async function createSageMigrationSession(pool, { companyId, userId = 'admin' }) {
+  const setupStepKey = 2200900;
+
+  const result = await pool.request()
+    .input('companyId', sql.VarChar(3), companyId)
+    .input('setupStepKey', sql.Int, setupStepKey)
+    .input('userId', sql.VarChar(5), userId)
+    .query(`
+      DECLARE @SessionKey INT;
+
+      IF NOT EXISTS (
+          SELECT 1
+          FROM dbo.tsmCompanySetup
+          WHERE CompanyID = @companyId
+      )
+      BEGIN
+          INSERT INTO dbo.tsmCompanySetup
+              (CompanyID, MigrateSourceSystem, MigrateLinkKey, MigrateSourceVersionNo)
+          VALUES
+              (@companyId, 0, NULL, 'Any');
+      END;
+
+      SELECT TOP 1 @SessionKey = MigrateSessionKey
+      FROM dbo.tsmMigrateSession
+      WHERE CompanyID = @companyId
+        AND LastCompProcessTime IS NOT NULL
+        AND SetupStepKey = @setupStepKey
+        AND UserID = @userId
+      ORDER BY MigrateSessionKey DESC;
+
+      IF @SessionKey IS NULL
+      BEGIN
+          EXEC dbo.spGetNextSurrogateKey 'tsmMigrateSession', @SessionKey OUTPUT;
+
+          INSERT INTO dbo.tsmMigrateSession
+          (
+              MigrateSessionKey,
+              CompanyID,
+              LastCompProcessMode,
+              LastCompProcessNo,
+              LastCompProcessTime,
+              SetupStepKey,
+              StartTime,
+              UserID
+          )
+          VALUES
+          (
+              @SessionKey,
+              @companyId,
+              1,
+              0,
+              NULL,
+              @setupStepKey,
+              GETDATE(),
+              @userId
+          );
+      END
+      ELSE
+      BEGIN
+          UPDATE dbo.tsmMigrateSession
+          SET LastCompProcessMode = 1,
+              LastCompProcessNo = 0,
+              LastCompProcessTime = NULL,
+              StartTime = GETDATE()
+          WHERE MigrateSessionKey = @SessionKey
+            AND UserID = @userId;
+      END;
+
+      DELETE FROM dbo.tsmMigrateStepParamValue
+      WHERE MigrateSessionKey = @SessionKey;
+
+      SELECT @SessionKey AS SessionKey;
+    `);
+
+  return result.recordset[0].SessionKey;
+}
+
+async function runSagePendingApSessionImport(pool, { companyId, sessionKey }) {
+  const request = pool.request();
+
+  request.input('CompanyID', sql.VarChar(3), companyId);
+  request.input('SessionKey', sql.Int, sessionKey);
+  request.input('UserID', sql.VarChar(5), 'admin');
+  request.output('ResultCode', sql.Int);
+  request.output('ResultMessage', sql.VarChar(4000));
+
+  const result = await request.execute('dbo.spQuadient_RunPendingAPVoucherSessionImport');
+
+  return {
+    sessionKey,
+    resultCode: result.output.ResultCode,
+    resultMessage: result.output.ResultMessage
+  };
+}
+
+async function verifySageVoucherCreated({ companyId, tranNo, vouchNo }) {
+  const result = await pool.request()
+    .input('companyId', sql.VarChar(3), companyId)
+    .input('tranNo', sql.VarChar(15), tranNo)
+    .input('vouchNo', sql.VarChar(10), vouchNo)
+    .query(`
+      SELECT TOP 1
+          VoucherKey,
+          CompanyID,
+          TranNo,
+          TranID,
+          VouchNo,
+          TranStatus,
+          TranType,
+          TranAmtHC
+      FROM dbo.tapVoucherLog
+      WHERE CompanyID = @companyId
+        AND TranNo = @tranNo
+        AND VouchNo = @vouchNo
+      ORDER BY VoucherKey DESC;
+    `);
+
+  return result.recordset.length > 0 ? result.recordset[0] : null;
+}
+
+async function getMigrationLogRowsForInvoice({ sessionKey, tranNo }) {
+  const result = await pool.request()
+    .input('sessionKey', sql.Int, sessionKey)
+    .input('tranNoPrefix', sql.VarChar(50), `${tranNo}%`)
+    .query(`
+      SELECT
+          EntryNo,
+          SessionKey,
+          Status,
+          EntityID,
+          ColumnID,
+          ColumnValue,
+          Comment
+      FROM dbo.tdmMigrationLogWrk
+      WHERE SessionKey = @sessionKey
+        AND (
+             EntityID LIKE @tranNoPrefix
+          OR ColumnValue LIKE @tranNoPrefix
+        )
+      ORDER BY EntryNo;
+    `);
+
+  return result.recordset;
+}
+
+async function markQuadientInvoiceRunning({ stagingId, sessionKey, message }) {
+  await pool.request()
+    .input('stagingId', sql.Int, stagingId)
+    .input('sessionKey', sql.Int, sessionKey)
+    .input('message', sql.NVarChar(sql.MAX), message || '')
+    .query(`
+      UPDATE dbo.QuadientInvoiceStaging
+      SET
+          ProcessingStatus = 'SageImportRunning',
+          ProcessingMessage = @message,
+          ProcessedAt = GETDATE()
+      WHERE QuadientInvoiceStagingID = @stagingId;
+    `);
+}
+
+async function markQuadientInvoiceImported({ stagingId, sessionKey, voucherKey, tranId, message }) {
+  await pool.request()
+    .input('stagingId', sql.Int, stagingId)
+    .input('sessionKey', sql.Int, sessionKey)
+    .input('voucherKey', sql.Int, voucherKey)
+    .input('tranId', sql.VarChar(20), tranId || '')
+    .input('message', sql.NVarChar(sql.MAX), message || '')
+    .query(`
+      UPDATE dbo.QuadientInvoiceStaging
+      SET
+          ProcessingStatus = 'Imported',
+          ProcessingMessage = @message,
+          ProcessedAt = GETDATE()
+      WHERE QuadientInvoiceStagingID = @stagingId;
+    `);
+}
+
+async function markQuadientInvoiceFailed({ stagingId, status = 'SageImportFailed', message }) {
+  await pool.request()
+    .input('stagingId', sql.Int, stagingId)
+    .input('status', sql.NVarChar(50), status)
+    .input('message', sql.NVarChar(sql.MAX), message || '')
+    .query(`
+      UPDATE dbo.QuadientInvoiceStaging
+      SET
+          ProcessingStatus = @status,
+          ProcessingMessage = @message,
+          ProcessedAt = GETDATE()
+      WHERE QuadientInvoiceStagingID = @stagingId;
+    `);
 }
 
 async function initDb() {
@@ -1891,24 +2496,31 @@ app.post('/quadient/invoice/reprocess/:stagingId', async (req, res) => {
       companyId: invoice.CompanyID
     });
 
-    setImmediate(() => {
-      processQuadientInvoiceToSageImport({
-        stagingId,
-        payload: {
-          invoiceNumber: invoice.InvoiceNumber,
-          vendorKey: invoice.VendKey,
-          vendorId: invoice.VendorID,
-          companyId: invoice.CompanyID
-        }
-      }).catch(err => {
-        writeLog('quadient-invoice.log', 'MANUAL_REPROCESS_UNHANDLED_ERROR', {
-          stagingId,
-          invoiceNumber: invoice.InvoiceNumber,
-          message: err.message,
-          stack: err.stack
-        });
-      });
+    writeLog('quadient-invoice.log', 'INVOICE_READY_FOR_BATCH_IMPORT', {
+      stagingId,
+      invoiceNumber: payload.invoiceNumber,
+      companyId: payload.companyId || null,
+      vendorId: payload.vendorId || null
     });
+
+    // setImmediate(() => {
+    //   processQuadientInvoiceToSageImport({
+    //     stagingId,
+    //     payload: {
+    //       invoiceNumber: invoice.InvoiceNumber,
+    //       vendorKey: invoice.VendKey,
+    //       vendorId: invoice.VendorID,
+    //       companyId: invoice.CompanyID
+    //     }
+    //   }).catch(err => {
+    //     writeLog('quadient-invoice.log', 'MANUAL_REPROCESS_UNHANDLED_ERROR', {
+    //       stagingId,
+    //       invoiceNumber: invoice.InvoiceNumber,
+    //       message: err.message,
+    //       stack: err.stack
+    //     });
+    //   });
+    // });
 
     return res.status(202).json({
       status: 'reprocess_started',
@@ -2238,23 +2850,30 @@ app.post('/quadient/invoice', async (req, res) => {
         lineCount: payload.lines.length
       });
 
+      writeLog('quadient-invoice.log', 'INVOICE_READY_FOR_BATCH_IMPORT', {
+        stagingId,
+        invoiceNumber: payload.invoiceNumber,
+        companyId: payload.companyId || null,
+        vendorId: payload.vendorId || null
+      });
+
       /*
         Start Sage import after responding to Quadient.
         Errors are logged and emailed to AP, not returned to Quadient.
       */
-      setImmediate(() => {
-        processQuadientInvoiceToSageImport({
-          stagingId,
-          payload
-        }).catch(err => {
-          writeLog('quadient-invoice.log', 'SAGE_IMPORT_BACKGROUND_UNHANDLED_ERROR', {
-            stagingId,
-            invoiceNumber: payload?.invoiceNumber || null,
-            message: err.message,
-            stack: err.stack
-          });
-        });
-      });
+      // setImmediate(() => {
+      //   processQuadientInvoiceToSageImport({
+      //     stagingId,
+      //     payload
+      //   }).catch(err => {
+      //     writeLog('quadient-invoice.log', 'SAGE_IMPORT_BACKGROUND_UNHANDLED_ERROR', {
+      //       stagingId,
+      //       invoiceNumber: payload?.invoiceNumber || null,
+      //       message: err.message,
+      //       stack: err.stack
+      //     });
+      //   });
+      // });
 
       return;
 
