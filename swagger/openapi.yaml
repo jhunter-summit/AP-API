@@ -594,6 +594,7 @@ paths:
                 invoiceNumber: TEST-BEAN-1001
                 vendorKey: 123
                 vendorId: TESTVENDOR
+                exportDate : "2026-08-05"
                 lineCount: 1
         '400':
           description: Payload validation failed
