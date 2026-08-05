@@ -322,8 +322,18 @@ async function pushQuadientInvoiceToSageDim({stagingId, invoiceNumber, sessionKe
         SELECT
             LEFT(ISNULL(h.Currency, 'USD'), 3) AS CurrID,
             h.DueDate,
-            h.InvoiceDate AS InvcRcptDate,
-            h.InvoiceDate AS PostDate,
+
+            COALESCE(
+                h.ExportDate,
+                CAST(h.CreatedAt AS DATE),
+                h.InvoiceDate
+            ) AS InvcRcptDate,
+
+            COALESCE(
+                h.ExportDate,
+                CAST(h.CreatedAt AS DATE),
+                h.InvoiceDate
+            ) AS PostDate,
             CAST(ROUND(h.TotalAmount, 2) AS DECIMAL(15, 2)) AS PurchAmt,
             CAST(ROUND(h.TotalAmount, 2) AS DECIMAL(15, 2)) AS TranAmt,
             CAST(ROUND(h.TotalAmount, 2) AS DECIMAL(15, 2)) AS TranAmtHC,
