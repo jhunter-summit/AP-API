@@ -1184,6 +1184,10 @@ components:
           type: string
           format: date
           example: '2026-05-07'
+          description: >
+            Original invoice date from the supplier invoice. This value is retained for
+            audit/reference purposes. For Sage Pending AP Voucher import dates, Summit
+            uses exportDate when provided.
         dueDate:
           type: string
           format: date
@@ -1211,6 +1215,15 @@ components:
           type: number
           format: double
           example: 125.0
+        exportDate:
+          type: string
+          format: date
+          example: "2026-08-05"
+          description: >
+            Date the invoice batch was exported/sent from Quadient to Summit.
+            Summit uses this value as the Sage AP invoice date, invoice received date,
+            and posting date for Pending AP Voucher import. If omitted, Summit defaults
+            it to the API receive date.
         lines:
           type: array
           minItems: 1
