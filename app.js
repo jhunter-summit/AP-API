@@ -938,51 +938,32 @@ async function createSageMigrationSession(pool, { companyId, userId = 'admin' })
               (@companyId, 0, NULL, 'Any');
       END;
 
-      SELECT TOP 1 @SessionKey = MigrateSessionKey
-      FROM dbo.tsmMigrateSession
-      WHERE CompanyID = @companyId
-        AND LastCompProcessTime IS NOT NULL
-        AND SetupStepKey = @setupStepKey
-        AND UserID = @userId
-      ORDER BY MigrateSessionKey DESC;
+      EXEC dbo.spGetNextSurrogateKey 'tsmMigrateSession', @SessionKey OUTPUT;
 
-      IF @SessionKey IS NULL
-      BEGIN
-          EXEC dbo.spGetNextSurrogateKey 'tsmMigrateSession', @SessionKey OUTPUT;
-
-          INSERT INTO dbo.tsmMigrateSession
-          (
-              MigrateSessionKey,
-              CompanyID,
-              LastCompProcessMode,
-              LastCompProcessNo,
-              LastCompProcessTime,
-              SetupStepKey,
-              StartTime,
-              UserID
-          )
-          VALUES
-          (
-              @SessionKey,
-              @companyId,
-              1,
-              0,
-              NULL,
-              @setupStepKey,
-              GETDATE(),
-              @userId
-          );
-      END
-      ELSE
-      BEGIN
-          UPDATE dbo.tsmMigrateSession
-          SET LastCompProcessMode = 1,
-              LastCompProcessNo = 0,
-              LastCompProcessTime = NULL,
-              StartTime = GETDATE()
-          WHERE MigrateSessionKey = @SessionKey
-            AND UserID = @userId;
-      END;
+      INSERT INTO dbo.tsmMigrateSession
+      (
+          MigrateSessionKey,
+          CompanyID,
+          LastCompProcessMode,
+          LastCompProcessNo,
+          LastCompProcessTime,
+          SessionType,
+          SetupStepKey,
+          StartTime,
+          UserID
+      )
+      VALUES
+      (
+          @SessionKey,
+          @companyId,
+          1,
+          0,
+          NULL,
+          0,
+          @setupStepKey,
+          GETDATE(),
+          @userId
+      );
 
       DELETE FROM dbo.tsmMigrateStepParamValue
       WHERE MigrateSessionKey = @SessionKey;
