@@ -1006,11 +1006,45 @@ async function verifySageVoucherCreated({ companyId, tranNo, vouchNo }) {
           VouchNo,
           TranStatus,
           TranType,
-          TranAmtHC
+          TranAmtHC,
+          'tapVoucherLog' AS SourceTable
       FROM dbo.tapVoucherLog
       WHERE CompanyID = @companyId
         AND TranNo = @tranNo
         AND VouchNo = @vouchNo
+
+      UNION ALL
+
+      SELECT TOP 1
+          VoucherKey,
+          CompanyID,
+          TranNo,
+          TranID,
+          NULL AS VouchNo,
+          NULL AS TranStatus,
+          TranType,
+          TranAmtHC,
+          'tapPendVoucher' AS SourceTable
+      FROM dbo.tapPendVoucher
+      WHERE CompanyID = @companyId
+        AND TranNo = @tranNo
+
+      UNION ALL
+
+      SELECT TOP 1
+          VoucherKey,
+          CompanyID,
+          TranNo,
+          TranID,
+          NULL AS VouchNo,
+          NULL AS TranStatus,
+          TranType,
+          TranAmtHC,
+          'tapVoucher' AS SourceTable
+      FROM dbo.tapVoucher
+      WHERE CompanyID = @companyId
+        AND TranNo = @tranNo
+
       ORDER BY VoucherKey DESC;
     `);
 
