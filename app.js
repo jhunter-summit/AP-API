@@ -160,6 +160,10 @@ function validateQuadientInvoice(payload) {
     payload.lines.forEach((line, index) => {
       const lineType = normalizeInvoiceLineType(line);
       const validLineTypes = ['PO_MATCHED', 'ADDITIONAL_CHARGE'];
+      const lineDescription =
+        String(line.description || '').trim()
+        || String(payload.memo || '').trim()
+        || `${line.lineType || 'Invoice line'} for invoice ${payload.invoiceNumber}`;
 
       if (!validLineTypes.includes(lineType)) {
         errors.push(`lines[${index}].lineType must be one of: ${validLineTypes.join(', ')}`);
@@ -193,15 +197,25 @@ function validateQuadientInvoice(payload) {
         }
 
         if (lineType === 'ADDITIONAL_CHARGE') {
-          if (!line.description) {
-            errors.push(`lines[${index}].description is required for ADDITIONAL_CHARGE lines`);
+          const resolvedDescription =
+            String(line.description || '').trim()
+            || String(payload.memo || '').trim()
+            || `${lineType} for invoice ${payload.invoiceNumber}`;
+
+          if (!resolvedDescription) {
+            errors.push(`lines[${index}].description or invoice memo is required for ADDITIONAL_CHARGE lines`);
           }
         }
       }
 
       if (invoiceType === 'TWO_WAY') {
-        if (!line.description) {
-          errors.push(`lines[${index}].description is required for TWO_WAY invoices`);
+        const resolvedDescription =
+          String(line.description || '').trim()
+          || String(payload.memo || '').trim()
+          || `${lineType || 'Invoice line'} for invoice ${payload.invoiceNumber}`;
+
+        if (!resolvedDescription) {
+          errors.push(`lines[${index}].description or invoice memo is required for TWO_WAY invoices`);
         }
       }
     });
@@ -1276,26 +1290,6 @@ function normalizeInvoiceLineType(line) {
   }
 
   return 'ADDITIONAL_CHARGE';
-}
-
-function normalizeInvoiceType(value) {
-  const text = cleanString(value || 'PO_MATCHED');
-
-  if (!text) return 'PO_MATCHED';
-
-  const normalized = text
-    .toUpperCase()
-    .replace(/[\s-]+/g, '_');
-
-  if (normalized === 'TWO_WAY' || normalized === '2_WAY' || normalized === 'NON_PO') {
-    return 'TWO_WAY';
-  }
-
-  if (normalized === 'PO_MATCHED' || normalized === 'THREE_WAY' || normalized === '3_WAY') {
-    return 'PO_MATCHED';
-  }
-
-  return normalized;
 }
 
 app.get('/db-test', async (req, res) => {
@@ -2743,6 +2737,10 @@ app.post('/quadient/invoice', async (req, res) => {
       for (const line of payload.lines) {
         const lineRequest = new sql.Request(transaction);
         const lineType = normalizeInvoiceLineType(line);
+        const lineDescription =
+          String(line.description || '').trim()
+          || String(payload.memo || '').trim()
+          || `${line.lineType || 'Invoice line'} for invoice ${payload.invoiceNumber}`;
 
         await lineRequest
           .input('stagingId', sql.Int, stagingId)
@@ -2760,7 +2758,7 @@ app.post('/quadient/invoice', async (req, res) => {
           .input('poLineKey', sql.Int, line.poLineKey ?? null)
           .input('poLineNumber', sql.Int, line.poLineNumber ?? null)
           .input('rcvrLineKey', sql.Int, line.rcvrLineKey ?? null)
-          .input('description', sql.NVarChar(sql.MAX), cleanString(line.description))
+          .input('description', sql.NVarChar(sql.MAX), cleanString(lineDescription))
           .input('sTaxClassKey', sql.Int, line.sTaxClassKey ?? null)
           .input('department', sql.NVarChar(50), cleanString(line.department))
           .input('costCenter', sql.NVarChar(50), cleanString(line.costCenter))
