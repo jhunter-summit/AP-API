@@ -865,7 +865,7 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
       const failureMessage =
         migrationLogRows.length > 0
           ? migrationLogRows.map(r => r.Comment).filter(Boolean).join(' | ')
-          : `Sage import did not create a voucher. SessionKey=${sessionKey}; TranNo=${result.tranNo}; VouchNo=${result.vouchNo}`;
+          : `Invoice was pushed to Sage DIM staging, but Sage did not consume the staged rows during the automated import call. SessionKey=${sessionKey}; TranNo=${result.tranNo}; VouchNo=${result.vouchNo}`;
 
       await markQuadientInvoiceFailed({
         stagingId: result.stagingId,
