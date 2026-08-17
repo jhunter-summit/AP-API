@@ -868,6 +868,13 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
       };
   }
 
+  const sageImportResult = await runSagePendingApSessionImportWithRetry({
+    companyId,
+    sessionKey,
+    maxAttempts: 4,
+    delayMs: 5000
+  });
+
   writeLog('quadient-invoice.log', 'COMPANY_BATCH_SAGE_IMPORT_RESULT', {
     companyId,
     sessionKey,
