@@ -28,6 +28,7 @@ app.use((req, res, next) => {
 });
 
 const port = process.env.PORT || 3000;
+const isProduction = process.env.NODE_ENV === 'production';
 
 const fs = require('fs');
 const path = require('path');
@@ -642,6 +643,10 @@ async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
           CreatedAt
       FROM dbo.QuadientInvoiceStaging
       WHERE ProcessingStatus = 'ReadyForDIM'
+        OR (
+            ProcessingStatus = 'PushedToSageStaging'
+            AND SageImportSessionKey IS NOT NULL
+        )
       ORDER BY CompanyID, CreatedAt, QuadientInvoiceStagingID;
     `);
 
@@ -820,36 +825,58 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
       return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  async function runSagePendingApSessionImportWithRetry({
-      companyId,
-      sessionKey,
-      maxAttempts = 4,
-      delayMs = 5000
-  }) {
+  async function runSagePendingApSessionImportWithRetry(pool, options = {}) {
+      const {
+          companyId,
+          sessionKey,
+          maxAttempts = 4,
+          delayMs = 5000
+      } = options;
+
+      if (!pool) {
+          throw new Error('runSagePendingApSessionImportWithRetry missing SQL pool.');
+      }
+
+      if (!companyId || !sessionKey) {
+          throw new Error(
+              `runSagePendingApSessionImportWithRetry missing required options. companyId=${companyId || ''}; sessionKey=${sessionKey || ''}`
+          );
+      }
+
       let lastResult = null;
 
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          lastResult = await runSagePendingApSessionImport({
-              companyId,
-              sessionKey
-          });
+      const isProduction = process.env.NODE_ENV === 'production';
 
-          logQuadientInvoiceEvent('SAGE_IMPORT_ATTEMPT_RESULT', {
+      const simulatedMinus20Attempts =
+          isProduction
+              ? 0
+              : Number(process.env.SAGE_IMPORT_SIMULATE_MINUS20_ATTEMPTS || 0);
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          if (simulatedMinus20Attempts > 0 && attempt <= simulatedMinus20Attempts) {
+              lastResult = {
+                  sessionKey,
+                  resultCode: -20,
+                  resultMessage:
+                      `SIMULATED -20 for retry testing. SessionKey=${sessionKey}; Attempt=${attempt}`
+              };
+          } else {
+              lastResult = await runSagePendingApSessionImport(pool, {
+                  companyId,
+                  sessionKey
+              });
+          }
+
+          writeLog('quadient-invoice.log', 'SAGE_IMPORT_ATTEMPT_RESULT', {
               companyId,
               sessionKey,
               attempt,
               maxAttempts,
               resultCode: lastResult.resultCode,
-              resultMessage: lastResult.resultMessage
+              resultMessage: lastResult.resultMessage,
+              simulatedMinus20Attempts
           });
 
-          /*
-              -20 means:
-              Rows were staged, but Sage did not consume them.
-
-              This is the timing/no-op condition we have seen repeatedly.
-              Retry the same SessionKey instead of immediately failing.
-          */
           if (lastResult.resultCode !== -20) {
               return {
                   ...lastResult,
@@ -868,18 +895,18 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
       };
   }
 
-  const sageImportResult = await runSagePendingApSessionImportWithRetry({
-    companyId,
-    sessionKey,
-    maxAttempts: 4,
-    delayMs: 5000
+  const sageImportResult = await runSagePendingApSessionImportWithRetry(pool, {
+      companyId,
+      sessionKey,
+      maxAttempts: 4,
+      delayMs: 5000
   });
 
   writeLog('quadient-invoice.log', 'COMPANY_BATCH_SAGE_IMPORT_RESULT', {
     companyId,
     sessionKey,
-    resultCode: importResult.resultCode,
-    resultMessage: importResult.resultMessage
+    resultCode: sageImportResult.resultCode,
+    resultMessage: sageImportResult.resultMessage
   });
 
   for (const result of invoiceResults) {
@@ -933,7 +960,8 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
         companyId,
         vendorId: invoices.find(i => i.QuadientInvoiceStagingID === result.stagingId)?.VendorID || null,
         sessionKey,
-        resultCode: importResult.resultCode,
+        resultCode: sageImportResult.resultCode,
+        attemptCount: sageImportResult.attemptCount,
         resultMessage: failureMessage,
         migrationLogRows
       });
@@ -960,8 +988,8 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
     pushedCount,
     importedCount,
     failedCount,
-    resultCode: importResult.resultCode,
-    resultMessage: importResult.resultMessage,
+    resultCode: sageImportResult.resultCode,
+    resultMessage: sageImportResult.resultMessage,
     invoices: invoiceResults
   };
 
@@ -2286,6 +2314,7 @@ async function emailAccountingInvoiceImportFailure({
   vendorId,
   sessionKey,
   resultCode,
+  attemptCount,
   resultMessage,
   migrationLogRows,
   error
@@ -2326,6 +2355,7 @@ async function emailAccountingInvoiceImportFailure({
     `Vendor ID: ${vendorId || ''}`,
     `SessionKey: ${sessionKey || ''}`,
     `ResultCode: ${resultCode ?? ''}`,
+    `Attempts: ${attemptCount || 1}`,
     `ResultMessage: ${resultMessage || ''}`,
     '',
     'Migration Log:',
