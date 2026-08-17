@@ -829,8 +829,8 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
       const {
           companyId,
           sessionKey,
-          maxAttempts = 4,
-          delayMs = 5000
+          maxAttempts = 8,
+          delayMs = 15000
       } = options;
 
       if (!pool) {
