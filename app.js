@@ -816,10 +816,57 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
     };
   }
 
-  const importResult = await runSagePendingApSessionImport(pool, {
-    companyId,
-    sessionKey
-  });
+  function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function runSagePendingApSessionImportWithRetry({
+      companyId,
+      sessionKey,
+      maxAttempts = 4,
+      delayMs = 5000
+  }) {
+      let lastResult = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          lastResult = await runSagePendingApSessionImport({
+              companyId,
+              sessionKey
+          });
+
+          logQuadientInvoiceEvent('SAGE_IMPORT_ATTEMPT_RESULT', {
+              companyId,
+              sessionKey,
+              attempt,
+              maxAttempts,
+              resultCode: lastResult.resultCode,
+              resultMessage: lastResult.resultMessage
+          });
+
+          /*
+              -20 means:
+              Rows were staged, but Sage did not consume them.
+
+              This is the timing/no-op condition we have seen repeatedly.
+              Retry the same SessionKey instead of immediately failing.
+          */
+          if (lastResult.resultCode !== -20) {
+              return {
+                  ...lastResult,
+                  attemptCount: attempt
+              };
+          }
+
+          if (attempt < maxAttempts) {
+              await sleep(delayMs);
+          }
+      }
+
+      return {
+          ...lastResult,
+          attemptCount: maxAttempts
+      };
+  }
 
   writeLog('quadient-invoice.log', 'COMPANY_BATCH_SAGE_IMPORT_RESULT', {
     companyId,
