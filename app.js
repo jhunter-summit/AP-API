@@ -48,6 +48,15 @@ const crypto = require('crypto');
 const SAGE_DIM_TRAN_TYPE_ID = process.env.SAGE_DIM_TRAN_TYPE_ID || 'IN';
 const SAGE_DIM_PO_MATCH_STATUS = Number(process.env.SAGE_DIM_PO_MATCH_STATUS || 2);
 const ENABLE_DIM_TEST_ENDPOINT = process.env.ENABLE_DIM_TEST_ENDPOINT === 'true';
+const SAGE_IMPORT_MAX_ATTEMPTS = Math.max(
+    1,
+    Number(process.env.SAGE_IMPORT_MAX_ATTEMPTS || 8)
+);
+
+const SAGE_IMPORT_RETRY_DELAY_MS = Math.max(
+    0,
+    Number(process.env.SAGE_IMPORT_RETRY_DELAY_MS || 15000)
+);
 
 let pool;
 
@@ -114,6 +123,13 @@ function writeLog(fileName, message, data = null) {
     }
   });
 }
+
+writeLog('quadient-invoice.log', 'SAGE_IMPORT_RETRY_CONFIG', {
+    nodeEnv: process.env.NODE_ENV || null,
+    maxAttempts: SAGE_IMPORT_MAX_ATTEMPTS,
+    retryDelayMs: SAGE_IMPORT_RETRY_DELAY_MS,
+    simulatedMinus20Attempts: process.env.SAGE_IMPORT_SIMULATE_MINUS20_ATTEMPTS || null
+});
 
 function validateQuadientInvoice(payload) {
   const errors = [];
@@ -639,6 +655,7 @@ async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
           VendKey,
           TotalAmount,
           ProcessingStatus,
+          SageImportSessionKey,
           ExportDate,
           CreatedAt
       FROM dbo.QuadientInvoiceStaging
@@ -651,6 +668,7 @@ async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
     `);
 
   const readyInvoices = readyResult.recordset;
+  let deferredCount = 0;
 
   if (readyInvoices.length === 0) {
     writeLog('quadient-invoice.log', 'IMPORT_READY_BATCHES_NONE_FOUND', {});
@@ -681,7 +699,11 @@ async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
       ? new Date(invoice.ExportDate).toISOString().substring(0, 10)
       : new Date(invoice.CreatedAt).toISOString().substring(0, 10);
 
-    const groupKey = `${companyId}|${exportDate}`;
+    const statusKey = invoice.ProcessingStatus === 'PushedToSageStaging'
+      ? `PushedToSageStaging|${invoice.SageImportSessionKey}`
+      : 'ReadyForDIM';
+
+    const groupKey = `${companyId}|${exportDate}|${statusKey}`;
 
     if (!groups.has(groupKey)) {
       groups.set(groupKey, {
@@ -707,6 +729,8 @@ async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
 
     importedCount += companyResult.importedCount;
     failedCount += companyResult.failedCount;
+    deferredCount += companyResult.deferredCount || 0;
+
     companyResults.push(companyResult);
   }
 
@@ -715,6 +739,7 @@ async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
     companyBatchCount: companyResults.length,
     importedCount,
     failedCount,
+    deferredCount,
     companyResults
   };
 
@@ -724,6 +749,17 @@ async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
 }
 
 async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate, invoices }) {
+  const readyInvoices = invoices.filter(i => i.ProcessingStatus === 'ReadyForDIM');
+  const pushedInvoices = invoices.filter(i => i.ProcessingStatus === 'PushedToSageStaging');
+
+  const isResumeBatch = pushedInvoices.length > 0 && readyInvoices.length === 0;
+  const isNewBatch = readyInvoices.length > 0 && pushedInvoices.length === 0;
+
+  if (!isResumeBatch && !isNewBatch) {
+    throw new Error(
+      `Mixed ReadyForDIM and PushedToSageStaging rows were grouped together for company ${companyId}. Split these into separate batches.`
+    );
+  }
   writeLog('quadient-invoice.log', 'COMPANY_BATCH_STARTED', {
     companyId,
     exportDate,
@@ -731,26 +767,68 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
     stagingIds: invoices.map(i => i.QuadientInvoiceStagingID)
   });
 
-  const sessionKey = await createSageMigrationSession(pool, {
-    companyId,
-    userId: 'admin'
-  });
+  let sessionKey;
 
-  writeLog('quadient-invoice.log', 'COMPANY_BATCH_SESSION_CREATED', {
-    companyId,
-    sessionKey,
-    invoiceCount: invoices.length
-  });
+  if (isResumeBatch) {
+    const sessionKeys = [...new Set(pushedInvoices.map(i => i.SageImportSessionKey))];
+
+    if (sessionKeys.length !== 1) {
+      throw new Error(
+        `PushedToSageStaging batch contains multiple SageImportSessionKey values: ${sessionKeys.join(', ')}`
+      );
+    }
+
+    sessionKey = sessionKeys[0];
+
+    writeLog('quadient-invoice.log', 'RESUMING_PUSHED_TO_SAGE_STAGING_BATCH', {
+      companyId,
+      sessionKey,
+      invoiceCount: invoices.length,
+      stagingIds: invoices.map(i => i.QuadientInvoiceStagingID)
+    });
+  } else {
+    sessionKey = await createSageMigrationSession(pool, {
+      companyId,
+      userId: 'admin'
+    });
+
+    writeLog('quadient-invoice.log', 'COMPANY_BATCH_SESSION_CREATED', {
+      companyId,
+      sessionKey,
+      invoiceCount: invoices.length
+    });
+  }
 
   let pushedCount = 0;
+  let resumedCount = 0;
   let importedCount = 0;
   let failedCount = 0;
   const invoiceResults = [];
 
   for (const invoice of invoices) {
     const stagingId = invoice.QuadientInvoiceStagingID;
+    const tranNo = String(invoice.InvoiceNumber || '').substring(0, 15);
+    const vouchNo = `Q${String(stagingId).padStart(9, '0')}`;
 
     try {
+      if (invoice.ProcessingStatus === 'PushedToSageStaging') {
+        
+        resumedCount++;
+
+        invoiceResults.push({
+          stagingId,
+          invoiceNumber: invoice.InvoiceNumber,
+          tranNo,
+          vouchNo,
+          pushed: true,
+          resumed: true,
+          imported: false,
+          failed: false
+        });
+
+        continue;
+      }
+
       await markQuadientInvoiceRunning({
         stagingId,
         sessionKey,
@@ -769,45 +847,59 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
         stagingId,
         invoiceNumber: invoice.InvoiceNumber,
         tranNo: dimResult.tranNo,
-        vouchNo: `Q${String(stagingId).padStart(9, '0')}`,
+        vouchNo,
         pushed: true,
+        resumed: false,
         imported: false,
         failed: false
       });
 
-    } catch (err) {
-      failedCount++;
+        } catch (err) {
+          failedCount++;
 
-      await markQuadientInvoiceFailed({
-        stagingId,
-        status: 'DIMStagingFailed',
-        message: `Failed to push invoice to Sage staging. ${err.message}`
-      });
+          await markQuadientInvoiceFailed({
+            stagingId,
+            status: 'DIMStagingFailed',
+            message: `Failed to push invoice to Sage staging. ${err.message}`,
+            sessionKey
+          });
 
-      writeLog('quadient-invoice.log', 'COMPANY_BATCH_DIM_PUSH_FAILED', {
-        companyId,
-        sessionKey,
-        stagingId,
-        invoiceNumber: invoice.InvoiceNumber,
-        message: err.message,
-        stack: err.stack
-      });
+          writeLog('quadient-invoice.log', 'COMPANY_BATCH_DIM_PUSH_FAILED', {
+            companyId,
+            sessionKey,
+            stagingId,
+            invoiceNumber: invoice.InvoiceNumber,
+            message: err.message,
+            stack: err.stack
+          });
 
-      await emailAccountingInvoiceImportFailure({
-        stagingId,
-        invoiceNumber: invoice.InvoiceNumber,
-        companyId,
-        vendorId: invoice.VendorID,
-        sessionKey,
-        resultCode: -100,
-        resultMessage: `Failed to push invoice to Sage staging. ${err.message}`,
-        migrationLogRows: [],
-        error: err
-      });
-    }
+          await emailAccountingInvoiceImportFailure({
+            stagingId,
+            invoiceNumber: invoice.InvoiceNumber,
+            companyId,
+            vendorId: invoice.VendorID,
+            sessionKey,
+            resultCode: -100,
+            attemptCount: 1,
+            resultMessage: `Failed to push invoice to Sage staging. ${err.message}`,
+            migrationLogRows: [],
+            error: err
+          });
+
+          invoiceResults.push({
+            stagingId,
+            invoiceNumber: invoice.InvoiceNumber,
+            tranNo,
+            vouchNo,
+            pushed: false,
+            resumed: false,
+            imported: false,
+            failed: true,
+            failureMessage: `Failed to push invoice to Sage staging. ${err.message}`
+          });
+        }
   }
-
-  if (pushedCount === 0) {
+  if (invoiceResults.filter(r => r.pushed).length === 0) {
     return {
       companyId,
       sessionKey,
@@ -898,8 +990,8 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
   const sageImportResult = await runSagePendingApSessionImportWithRetry(pool, {
       companyId,
       sessionKey,
-      maxAttempts: 4,
-      delayMs: 5000
+      maxAttempts: SAGE_IMPORT_MAX_ATTEMPTS,
+      delayMs: SAGE_IMPORT_RETRY_DELAY_MS
   });
 
   writeLog('quadient-invoice.log', 'COMPANY_BATCH_SAGE_IMPORT_RESULT', {
@@ -908,6 +1000,54 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
     resultCode: sageImportResult.resultCode,
     resultMessage: sageImportResult.resultMessage
   });
+
+  if (sageImportResult.resultCode === -20) {
+    writeLog('quadient-invoice.log', 'COMPANY_BATCH_DEFERRED_SAGE_NOT_CONSUMED', {
+      companyId,
+      sessionKey,
+      attemptCount: sageImportResult.attemptCount || 1,
+      resultCode: sageImportResult.resultCode,
+      resultMessage: sageImportResult.resultMessage,
+      stagingIds: invoiceResults.map(r => r.stagingId)
+    });
+
+    const deferredMessage =
+      `Sage did not consume staged rows after ${sageImportResult.attemptCount || 1} automated import attempts. ` +
+      `Batch left as PushedToSageStaging for retry on next scheduled run. SessionKey=${sessionKey}.`;
+
+    for (const result of invoiceResults) {
+      if (!result.pushed) continue;
+
+      await markQuadientInvoiceFailed({
+        stagingId: result.stagingId,
+        status: 'PushedToSageStaging',
+        sessionKey,
+        message: deferredMessage
+      });
+
+      result.deferred = true;
+      result.failed = false;
+      result.failureMessage = null;
+    }
+
+    const companyResult = {
+      companyId,
+      sessionKey,
+      invoiceCount: invoices.length,
+      pushedCount,
+      resumedCount,
+      importedCount,
+      failedCount,
+      deferredCount: invoiceResults.filter(r => r.deferred).length,
+      resultCode: -20,
+      resultMessage: deferredMessage,
+      invoices: invoiceResults
+    };
+
+    writeLog('quadient-invoice.log', 'COMPANY_BATCH_DEFERRED', companyResult);
+
+    return companyResult;
+  }
 
   for (const result of invoiceResults) {
     if (!result.pushed) {
@@ -986,6 +1126,7 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
     sessionKey,
     invoiceCount: invoices.length,
     pushedCount,
+    resumedCount,
     importedCount,
     failedCount,
     resultCode: sageImportResult.resultCode,
