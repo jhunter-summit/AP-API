@@ -32,6 +32,7 @@ const isProduction = process.env.NODE_ENV === 'production';
 
 const fs = require('fs');
 const path = require('path');
+const SAGE_IMPORT_USER_ID = process.env.SAGE_IMPORT_USER_ID || 'fyang';
 
 const config = {
   server: process.env.DB_SERVER,
@@ -486,8 +487,8 @@ async function pushQuadientInvoiceToSageDim({stagingId, invoiceNumber, sessionKe
 
                         ELSE ABS(l.UnitCost)
                     END,
-                    2
-                ) AS DECIMAL(15, 2)
+                    5
+                ) AS DECIMAL(15, 5)
             ) AS UnitCost,
 
             LEFT(l.UnitMeasure, 6) AS UnitMeasID,
@@ -639,6 +640,126 @@ async function pushQuadientInvoiceToSageDim({stagingId, invoiceNumber, sessionKe
 
 let batchImportRunning = false;
 
+async function validateThreeWayInvoice({ stagingId, voucherKey = null }) {
+  const request = pool.request();
+
+  request.input('QuadientInvoiceStagingID', sql.Int, stagingId);
+  request.input('VoucherKey', sql.Int, voucherKey);
+  request.output('ResultCode', sql.Int);
+  request.output('ResultMessage', sql.VarChar(4000));
+
+  const result = await request.execute('dbo.spQuadient_Validate3WayVoucher_MultiLine_vNext');
+
+  return {
+    stagingId,
+    voucherKey,
+    resultCode: result.output.ResultCode,
+    resultMessage: result.output.ResultMessage,
+    recordsets: result.recordsets
+  };
+}
+
+async function postProcessThreeWayVoucher({ stagingId, voucherKey }) {
+  const request = pool.request();
+
+  request.input('QuadientInvoiceStagingID', sql.Int, stagingId);
+  request.input('VoucherKey', sql.Int, voucherKey);
+  request.output('ResultCode', sql.Int);
+  request.output('ResultMessage', sql.VarChar(4000));
+
+  const result = await request.execute('dbo.spQuadient_PostProcess3WayVoucher_MultiLine_vNext');
+
+  return {
+    stagingId,
+    voucherKey,
+    resultCode: result.output.ResultCode,
+    resultMessage: result.output.ResultMessage,
+    recordsets: result.recordsets
+  };
+}
+
+app.post('/quadient/invoice/test-3way/:stagingId', async (req, res) => {
+  if (!ENABLE_DIM_TEST_ENDPOINT) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const stagingId = Number(req.params.stagingId);
+
+  if (!Number.isInteger(stagingId) || stagingId <= 0) {
+    return res.status(400).json({
+      error: 'INVALID_STAGING_ID',
+      message: 'stagingId must be a positive integer.'
+    });
+  }
+
+  try {
+    //const pool = await getPool();
+    if (!pool) {
+      throw new Error('SQL connection pool is not initialized.');
+    }
+
+    const invoiceResult = await pool.request()
+      .input('stagingId', sql.Int, stagingId)
+      .query(`
+        SELECT
+            QuadientInvoiceStagingID,
+            InvoiceNumber,
+            InvoiceType,
+            CompanyID,
+            VendorID,
+            VendKey,
+            ProcessingStatus,
+            SageImportSessionKey,
+            ExportDate,
+            CreatedAt
+        FROM dbo.QuadientInvoiceStaging
+        WHERE QuadientInvoiceStagingID = @stagingId;
+      `);
+
+    const invoice = invoiceResult.recordset[0];
+
+    if (!invoice) {
+      return res.status(404).json({
+        error: 'INVOICE_NOT_FOUND',
+        message: `No Quadient staging invoice found for ID ${stagingId}.`
+      });
+    }
+
+    const invoiceType = normalizeInvoiceType(invoice.InvoiceType);
+
+    if (invoiceType !== 'PO_MATCHED') {
+      return res.status(409).json({
+        error: 'NOT_PO_MATCHED',
+        message: `Invoice ${stagingId} is not PO_MATCHED. InvoiceType=${invoice.InvoiceType}.`,
+        invoice
+      });
+    }
+
+    if (invoice.ProcessingStatus !== 'ReadyForDIM') {
+      return res.status(409).json({
+        error: 'INVOICE_NOT_READY_FOR_DIM',
+        message: `Invoice ${stagingId} is not ReadyForDIM. Current status=${invoice.ProcessingStatus}.`,
+        invoice
+      });
+    }
+
+    const result = await processThreeWayInvoice({ invoice });
+
+    return res.json({
+      ...result,
+      status: 'three_way_test_completed'
+    });
+  } catch (err) {
+    const statusCode = err.statusCode || 500;
+
+    return res.status(statusCode).json({
+      error: err.code || 'THREE_WAY_TEST_FAILED',
+      message: err.message,
+      ...(err.details || {})
+    });
+  }
+});
+
 async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
   writeLog('quadient-invoice.log', 'IMPORT_READY_BATCHES_STARTED', {
     batchSize
@@ -650,6 +771,7 @@ async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
       SELECT TOP (@batchSize)
           QuadientInvoiceStagingID,
           InvoiceNumber,
+          InvoiceType,
           CompanyID,
           VendorID,
           VendKey,
@@ -668,7 +790,6 @@ async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
     `);
 
   const readyInvoices = readyResult.recordset;
-  let deferredCount = 0;
 
   if (readyInvoices.length === 0) {
     writeLog('quadient-invoice.log', 'IMPORT_READY_BATCHES_NONE_FOUND', {});
@@ -681,71 +802,300 @@ async function importReadyQuadientInvoiceBatches({ batchSize = 100 } = {}) {
     };
   }
 
-  const groups = new Map();
+const companyResults = [];
+const threeWayResults = [];
 
-  for (const invoice of readyInvoices) {
-    const companyId = String(invoice.CompanyID || '').trim();
+let importedCount = 0;
+let failedCount = 0;
+let deferredCount = 0;
 
-    if (!companyId) {
-      await markQuadientInvoiceFailed({
-        stagingId: invoice.QuadientInvoiceStagingID,
-        status: 'DIMStagingFailed',
-        message: 'CompanyID is blank; cannot batch import invoice.'
-      });
-      continue;
-    }
+const twoWayInvoices = readyInvoices.filter(i =>
+  normalizeInvoiceType(i.InvoiceType) === 'TWO_WAY'
+);
 
-    const exportDate = invoice.ExportDate
-      ? new Date(invoice.ExportDate).toISOString().substring(0, 10)
-      : new Date(invoice.CreatedAt).toISOString().substring(0, 10);
+const threeWayInvoices = readyInvoices.filter(i =>
+  normalizeInvoiceType(i.InvoiceType) === 'PO_MATCHED'
+);
 
-    const statusKey = invoice.ProcessingStatus === 'PushedToSageStaging'
-      ? `PushedToSageStaging|${invoice.SageImportSessionKey}`
-      : 'ReadyForDIM';
+const unsupportedInvoices = readyInvoices.filter(i => {
+  const invoiceType = normalizeInvoiceType(i.InvoiceType);
+  return invoiceType !== 'TWO_WAY' && invoiceType !== 'PO_MATCHED';
+});
 
-    const groupKey = `${companyId}|${exportDate}|${statusKey}`;
+for (const invoice of unsupportedInvoices) {
+  const message =
+    `Unsupported InvoiceType for DIM import. ` +
+    `InvoiceType=${invoice.InvoiceType || ''}, ` +
+    `NormalizedInvoiceType=${normalizeInvoiceType(invoice.InvoiceType)}.`;
 
-    if (!groups.has(groupKey)) {
-      groups.set(groupKey, {
-        companyId,
-        exportDate,
-        invoices: []
-      });
-    }
+  await markQuadientInvoiceFailed({
+    stagingId: invoice.QuadientInvoiceStagingID,
+    status: 'DIMStagingFailed',
+    message
+  });
 
-    groups.get(groupKey).invoices.push(invoice);
-  }
+  failedCount += 1;
 
-  const companyResults = [];
-  let importedCount = 0;
-  let failedCount = 0;
+  writeLog('quadient-invoice.log', 'IMPORT_READY_UNSUPPORTED_INVOICE_TYPE', {
+    stagingId: invoice.QuadientInvoiceStagingID,
+    invoiceNumber: invoice.InvoiceNumber,
+    companyId: invoice.CompanyID,
+    vendorId: invoice.VendorID,
+    invoiceType: invoice.InvoiceType,
+    message
+  });
+}
 
-  for (const [groupKey, group] of groups.entries()) {
-    const companyResult = await importReadyQuadientInvoiceBatchForCompany({
-      companyId: group.companyId,
-      exportDate: group.exportDate,
-      invoices: group.invoices
+/*
+ * 1. Process PO_MATCHED invoices through the 3-way path.
+ *    These must never fall through to the regular two-way batch importer.
+ */
+for (const invoice of threeWayInvoices) {
+  const stagingId = invoice.QuadientInvoiceStagingID;
+  const invoiceNumber = invoice.InvoiceNumber;
+  const companyId = String(invoice.CompanyID || '').trim();
+
+  if (!companyId) {
+    const message = 'CompanyID is blank; cannot import PO_MATCHED invoice.';
+
+    await markQuadientInvoiceThreeWayException({
+      stagingId,
+      message
     });
 
-    importedCount += companyResult.importedCount;
-    failedCount += companyResult.failedCount;
-    deferredCount += companyResult.deferredCount || 0;
+    failedCount += 1;
 
-    companyResults.push(companyResult);
+    threeWayResults.push({
+      stagingId,
+      invoiceNumber,
+      status: 'three_way_failed',
+      error: 'MISSING_COMPANY_ID',
+      message
+    });
+
+    continue;
   }
 
-  const result = {
-    totalReady: readyInvoices.length,
-    companyBatchCount: companyResults.length,
-    importedCount,
-    failedCount,
-    deferredCount,
-    companyResults
-  };
+  if (invoice.ProcessingStatus !== 'ReadyForDIM') {
+    const message =
+      `PO_MATCHED invoice is not ReadyForDIM and cannot be safely processed by the 3-way importer. ` +
+      `Current status=${invoice.ProcessingStatus}, SageImportSessionKey=${invoice.SageImportSessionKey || ''}.`;
 
-  writeLog('quadient-invoice.log', 'IMPORT_READY_BATCHES_COMPLETED', result);
+    await markQuadientInvoiceThreeWayException({
+      stagingId,
+      message
+    });
 
-  return result;
+    failedCount += 1;
+
+    threeWayResults.push({
+      stagingId,
+      invoiceNumber,
+      companyId,
+      status: 'three_way_failed',
+      error: 'PO_MATCHED_NOT_READY_FOR_DIM',
+      message
+    });
+
+    writeLog('quadient-invoice.log', 'THREE_WAY_NOT_READY_FOR_DIM', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      processingStatus: invoice.ProcessingStatus,
+      sageImportSessionKey: invoice.SageImportSessionKey
+    });
+
+    continue;
+  }
+
+  try {
+    const threeWayResult = await processThreeWayInvoice({ invoice });
+
+    importedCount += 1;
+    threeWayResults.push(threeWayResult);
+  } catch (err) {
+    failedCount += 1;
+
+    threeWayResults.push({
+      stagingId,
+      invoiceNumber,
+      companyId,
+      vendorId: invoice.VendorID,
+      status: 'three_way_failed',
+      error: err.code || 'THREE_WAY_IMPORT_FAILED',
+      message: err.message
+    });
+
+    /*
+     * processThreeWayInvoice already marks ThreeWayException and emails Accounting
+     * for validation/post-process failures. This catch is for batch accounting/logging.
+     */
+    writeLog('quadient-invoice.log', 'THREE_WAY_BATCH_ITEM_FAILED', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      vendorId: invoice.VendorID,
+      errorCode: err.code || null,
+      errorMessage: err.message,
+      stack: err.stack
+    });
+  }
+}
+
+/*
+ * 2. Process TWO_WAY invoices through the existing company batch path.
+ */
+const groups = new Map();
+
+for (const invoice of twoWayInvoices) {
+  const companyId = String(invoice.CompanyID || '').trim();
+
+  if (!companyId) {
+    await markQuadientInvoiceFailed({
+      stagingId: invoice.QuadientInvoiceStagingID,
+      status: 'DIMStagingFailed',
+      message: 'CompanyID is blank; cannot batch import invoice.'
+    });
+
+    failedCount += 1;
+    continue;
+  }
+
+  const exportDate = invoice.ExportDate
+    ? new Date(invoice.ExportDate).toISOString().substring(0, 10)
+    : new Date(invoice.CreatedAt).toISOString().substring(0, 10);
+
+  const statusKey = invoice.ProcessingStatus === 'PushedToSageStaging'
+    ? `PushedToSageStaging|${invoice.SageImportSessionKey}`
+    : 'ReadyForDIM';
+
+  const groupKey = `${companyId}|${exportDate}|${statusKey}`;
+
+  if (!groups.has(groupKey)) {
+    groups.set(groupKey, {
+      companyId,
+      exportDate,
+      invoices: []
+    });
+  }
+
+  groups.get(groupKey).invoices.push(invoice);
+}
+
+for (const [groupKey, group] of groups.entries()) {
+  const companyResult = await importReadyQuadientInvoiceBatchForCompany({
+    companyId: group.companyId,
+    exportDate: group.exportDate,
+    invoices: group.invoices
+  });
+
+  importedCount += companyResult.importedCount;
+  failedCount += companyResult.failedCount;
+  deferredCount += companyResult.deferredCount || 0;
+
+  companyResults.push(companyResult);
+}
+
+const result = {
+  totalReady: readyInvoices.length,
+  twoWayReadyCount: twoWayInvoices.length,
+  threeWayReadyCount: threeWayInvoices.length,
+  unsupportedInvoiceCount: unsupportedInvoices.length,
+  companyBatchCount: companyResults.length,
+  importedCount,
+  failedCount,
+  deferredCount,
+  companyResults,
+  threeWayResults
+};
+
+writeLog('quadient-invoice.log', 'IMPORT_READY_BATCHES_COMPLETED', result);
+
+return result;
+
+  // const groups = new Map();
+
+  // for (const invoice of readyInvoices) {
+  //   const companyId = String(invoice.CompanyID || '').trim();
+
+  //   if (!companyId) {
+  //     await markQuadientInvoiceFailed({
+  //       stagingId: invoice.QuadientInvoiceStagingID,
+  //       status: 'DIMStagingFailed',
+  //       message: 'CompanyID is blank; cannot batch import invoice.'
+  //     });
+  //     continue;
+  //   }
+
+  //   const exportDate = invoice.ExportDate
+  //     ? new Date(invoice.ExportDate).toISOString().substring(0, 10)
+  //     : new Date(invoice.CreatedAt).toISOString().substring(0, 10);
+
+  //   const statusKey = invoice.ProcessingStatus === 'PushedToSageStaging'
+  //     ? `PushedToSageStaging|${invoice.SageImportSessionKey}`
+  //     : 'ReadyForDIM';
+
+  //   const groupKey = `${companyId}|${exportDate}|${statusKey}`;
+
+  //   if (!groups.has(groupKey)) {
+  //     groups.set(groupKey, {
+  //       companyId,
+  //       exportDate,
+  //       invoices: []
+  //     });
+  //   }
+
+  //   groups.get(groupKey).invoices.push(invoice);
+  // }
+
+  // const companyResults = [];
+  // let importedCount = 0;
+  // let failedCount = 0;
+
+  // for (const [groupKey, group] of groups.entries()) {
+  //   const companyResult = await importReadyQuadientInvoiceBatchForCompany({
+  //     companyId: group.companyId,
+  //     exportDate: group.exportDate,
+  //     invoices: group.invoices
+  //   });
+
+  //   importedCount += companyResult.importedCount;
+  //   failedCount += companyResult.failedCount;
+  //   deferredCount += companyResult.deferredCount || 0;
+
+  //   companyResults.push(companyResult);
+  // }
+
+  // const result = {
+  //   totalReady: readyInvoices.length,
+  //   companyBatchCount: companyResults.length,
+  //   importedCount,
+  //   failedCount,
+  //   deferredCount,
+  //   companyResults
+  // };
+
+  // writeLog('quadient-invoice.log', 'IMPORT_READY_BATCHES_COMPLETED', result);
+
+  // return result;
+}
+
+async function markQuadientInvoiceThreeWayException({ stagingId, message }) {
+  if (!pool) {
+    throw new Error('SQL connection pool is not initialized.');
+  }
+
+  await pool.request()
+    .input('stagingId', sql.Int, stagingId)
+    .input('message', sql.NVarChar(sql.MAX), message || '')
+    .query(`
+      UPDATE dbo.QuadientInvoiceStaging
+      SET
+          ProcessingStatus = 'ThreeWayException',
+          ProcessingMessage = @message,
+          ProcessedAt = GETDATE()
+      WHERE QuadientInvoiceStagingID = @stagingId;
+    `);
 }
 
 async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate, invoices }) {
@@ -1139,7 +1489,7 @@ async function importReadyQuadientInvoiceBatchForCompany({ companyId, exportDate
   return companyResult;
 }
 
-async function createSageMigrationSession(pool, { companyId, userId = 'admin' }) {
+async function createSageMigrationSession(pool, { companyId, userId = SAGE_IMPORT_USER_ID }) {
   const setupStepKey = 2200900;
 
   const result = await pool.request()
@@ -1202,7 +1552,7 @@ async function runSagePendingApSessionImport(pool, { companyId, sessionKey }) {
 
   request.input('CompanyID', sql.VarChar(3), companyId);
   request.input('SessionKey', sql.Int, sessionKey);
-  request.input('UserID', sql.VarChar(5), 'admin');
+  request.input('UserID', sql.VarChar(5), SAGE_IMPORT_USER_ID);
   request.output('ResultCode', sql.Int);
   request.output('ResultMessage', sql.VarChar(4000));
 
@@ -1327,6 +1677,7 @@ async function markQuadientInvoiceImported({ stagingId, sessionKey, voucherKey, 
       SET
           ProcessingStatus = 'Imported',
           SageImportSessionKey = @sessionKey,
+          SageVoucherKey = @voucherKey,
           ProcessingMessage = @message,
           ProcessedAt = GETDATE()
       WHERE QuadientInvoiceStagingID = @stagingId;
@@ -1350,6 +1701,266 @@ async function markQuadientInvoiceFailed({ stagingId, status = 'SageImportFailed
     `);
 }
 
+async function processThreeWayInvoice({ invoice }) {
+  const stagingId = invoice.QuadientInvoiceStagingID;
+  const invoiceNumber = invoice.InvoiceNumber;
+  const companyId = invoice.CompanyID;
+  const vendorId = invoice.VendorID;
+
+  let validationBeforeImport = null;
+  let dimResult = null;
+  let sageImportResult = null;
+  let voucherCheck = null;
+  let postProcessResult = null;
+
+  try {
+    writeLog('quadient-invoice.log', 'THREE_WAY_VALIDATION_STARTED', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      vendorId
+    });
+
+    validationBeforeImport = await validateThreeWayInvoice({
+      stagingId,
+      voucherKey: null
+    });
+
+    writeLog('quadient-invoice.log', 'THREE_WAY_VALIDATION_RESULT', {
+      stagingId,
+      invoiceNumber,
+      resultCode: validationBeforeImport.resultCode,
+      resultMessage: validationBeforeImport.resultMessage
+    });
+
+    if (validationBeforeImport.resultCode !== 1) {
+      const message =
+        `3-way validation failed before Sage import. ${validationBeforeImport.resultMessage || ''}`;
+
+      await markQuadientInvoiceThreeWayException({
+        stagingId,
+        message
+      });
+
+      await emailAccountingInvoiceImportFailure({
+        invoiceNumber,
+        vendorId,
+        companyId,
+        stagingId,
+        message
+      });
+
+      const error = new Error(message);
+      error.code = 'THREE_WAY_VALIDATION_FAILED';
+      error.statusCode = 409;
+      error.details = {
+        invoice,
+        validationBeforeImport
+      };
+      throw error;
+    }
+
+    writeLog('quadient-invoice.log', 'THREE_WAY_SESSION_CREATE_STARTED', {
+      stagingId,
+      invoiceNumber,
+      companyId
+    });
+
+    //const pool = await getPool();
+    if (!pool) {
+      throw new Error('SQL connection pool is not initialized.');
+    }
+
+    const sessionKey = await createSageMigrationSession(pool, {
+      companyId,
+      userId: SAGE_IMPORT_USER_ID
+    });
+
+    writeLog('quadient-invoice.log', 'THREE_WAY_SESSION_CREATED', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      sessionKey
+    });
+
+    writeLog('quadient-invoice.log', 'THREE_WAY_DIM_PUSH_STARTED', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      sessionKey
+    });
+
+    dimResult = await pushQuadientInvoiceToSageDim({
+      stagingId,
+      invoiceNumber,
+      sessionKeyOverride: sessionKey
+    });
+
+    writeLog('quadient-invoice.log', 'THREE_WAY_DIM_PUSH_RESULT', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      sessionKey: dimResult.sessionKey,
+      detailCount: dimResult.detailCount,
+      pendVoucherRowKey: dimResult.pendVoucherRowKey,
+      processingStatus: dimResult.processingStatus
+    });
+
+    writeLog('quadient-invoice.log', 'THREE_WAY_SAGE_IMPORT_STARTED', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      sessionKey: dimResult.sessionKey
+    });
+
+    sageImportResult = await runSagePendingApSessionImport(pool, {
+      companyId,
+      sessionKey: dimResult.sessionKey
+    });
+
+    writeLog('quadient-invoice.log', 'THREE_WAY_SAGE_IMPORT_RESULT', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      sessionKey: dimResult.sessionKey,
+      resultCode: sageImportResult.resultCode,
+      resultMessage: sageImportResult.resultMessage
+    });
+
+    voucherCheck = await verifySageVoucherCreated({
+      companyId,
+      tranNo: dimResult.tranNo,
+      vouchNo: `Q${String(stagingId).padStart(9, '0')}`
+    });
+
+    if (!voucherCheck || !voucherCheck.VoucherKey) {
+      const message =
+        `Sage import did not create a pending voucher for 3-way invoice. ` +
+        `CompanyID=${companyId}, TranNo=${dimResult.tranNo}, SessionKey=${dimResult.sessionKey}.`;
+
+      await markQuadientInvoiceThreeWayException({
+        stagingId,
+        message
+      });
+
+      await emailAccountingInvoiceImportFailure({
+        invoiceNumber,
+        vendorId,
+        companyId,
+        stagingId,
+        message
+      });
+
+      const error = new Error(message);
+      error.code = 'THREE_WAY_VOUCHER_NOT_FOUND';
+      error.statusCode = 500;
+      error.details = {
+        invoice,
+        validationBeforeImport,
+        dimResult,
+        sageImportResult,
+        voucherCheck
+      };
+      throw error;
+    }
+
+    writeLog('quadient-invoice.log', 'THREE_WAY_POSTPROCESS_STARTED', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      voucherKey: voucherCheck.VoucherKey
+    });
+
+    postProcessResult = await postProcessThreeWayVoucher({
+      stagingId,
+      voucherKey: voucherCheck.VoucherKey
+    });
+
+    writeLog('quadient-invoice.log', 'THREE_WAY_POSTPROCESS_RESULT', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      voucherKey: voucherCheck.VoucherKey,
+      resultCode: postProcessResult.resultCode,
+      resultMessage: postProcessResult.resultMessage
+    });
+
+    if (postProcessResult.resultCode !== 1) {
+      const message =
+        `3-way post-process failed after Sage import. ${postProcessResult.resultMessage || ''}`;
+
+      await markQuadientInvoiceThreeWayException({
+        stagingId,
+        message
+      });
+
+      await emailAccountingInvoiceImportFailure({
+        invoiceNumber,
+        vendorId,
+        companyId,
+        stagingId,
+        message
+      });
+
+      const error = new Error(message);
+      error.code = 'THREE_WAY_POSTPROCESS_FAILED';
+      error.statusCode = 500;
+      error.details = {
+        invoice,
+        validationBeforeImport,
+        dimResult,
+        sageImportResult,
+        voucherCheck,
+        postProcessResult
+      };
+      throw error;
+    }
+
+    await markQuadientInvoiceImported({
+      stagingId,
+      sessionKey: dimResult.sessionKey,
+      voucherKey: voucherCheck.VoucherKey,
+      tranId: voucherCheck.TranID,
+      message:
+        `3-way PO matched invoice imported and post-processed successfully. ` +
+        `VoucherKey=${voucherCheck.VoucherKey}, SessionKey=${dimResult.sessionKey}.`
+    });
+
+    writeLog('quadient-invoice.log', 'THREE_WAY_COMPLETED', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      vendorId,
+      sessionKey: dimResult.sessionKey,
+      voucherKey: voucherCheck.VoucherKey
+    });
+
+    return {
+      status: 'three_way_completed',
+      stagingId,
+      invoiceNumber,
+      companyId,
+      vendorId,
+      validationBeforeImport,
+      dimResult,
+      sageImportResult,
+      voucherCheck,
+      postProcessResult
+    };
+  } catch (err) {
+    writeLog('quadient-invoice.log', 'THREE_WAY_EXCEPTION', {
+      stagingId,
+      invoiceNumber,
+      companyId,
+      vendorId,
+      errorCode: err.code || null,
+      errorMessage: err.message,
+      stack: err.stack
+    });
+
+    throw err;
+  }
+}
 async function initDb() {
     pool = await sql.connect(config);
     console.log('Connected to SQL Server');
