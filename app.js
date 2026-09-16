@@ -1495,7 +1495,7 @@ async function createSageMigrationSession(pool, { companyId, userId = SAGE_IMPOR
   const result = await pool.request()
     .input('companyId', sql.VarChar(3), companyId)
     .input('setupStepKey', sql.Int, setupStepKey)
-    .input('UserID', sql.VarChar(5), SAGE_IMPORT_USER_ID);
+    .input('userId', sql.VarChar(5), userId)
     .query(`
       DECLARE @SessionKey INT;
 
