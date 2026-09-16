@@ -1495,7 +1495,7 @@ async function createSageMigrationSession(pool, { companyId, userId = SAGE_IMPOR
   const result = await pool.request()
     .input('companyId', sql.VarChar(3), companyId)
     .input('setupStepKey', sql.Int, setupStepKey)
-    .input('userId', sql.VarChar(5), userId)
+    .input('UserID', sql.VarChar(5), SAGE_IMPORT_USER_ID);
     .query(`
       DECLARE @SessionKey INT;
 
@@ -2076,6 +2076,20 @@ app.post('/quadient/invoice/import-ready-batches', async (req, res) => {
     batchImportRunning = false;
   }
 });
+
+function decodeHtmlEntities(value) {
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  return String(value)
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+}
 
 function cleanString(value) {
   if (value === undefined || value === null) return null;
@@ -2999,10 +3013,12 @@ app.get('/statements', async (req, res) => {
 async function runSagePendingApImport(pool, { companyId, tranNo, vendId }) {
   const request = pool.request();
 
+  const sageVendId = decodeHtmlEntities(vendId || '').trim();
+
   request.input('CompanyID', sql.VarChar(3), companyId);
   request.input('TranNo', sql.VarChar(30), tranNo);
-  request.input('VendID', sql.VarChar(12), vendId);
-  request.input('UserID', sql.VarChar(5), 'admin');
+  request.input('VendID', sql.VarChar(12), sageVendId);
+  request.input('UserID', sql.VarChar(5), SAGE_IMPORT_USER_ID);
 
   request.output('SessionKey', sql.Int);
   request.output('ResultCode', sql.Int);
