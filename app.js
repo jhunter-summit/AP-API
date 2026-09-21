@@ -132,6 +132,60 @@ writeLog('quadient-invoice.log', 'SAGE_IMPORT_RETRY_CONFIG', {
     simulatedMinus20Attempts: process.env.SAGE_IMPORT_SIMULATE_MINUS20_ATTEMPTS || null
 });
 
+async function resolveSageVendor({
+  companyId,
+  vendorId,
+  vendorKey
+}) {
+  const normalizedVendorId =
+    decodeHtmlEntities(vendorId || '').trim();
+
+  const request = pool.request();
+
+  request.input('CompanyID', sql.VarChar(3), companyId);
+  request.input('VendorID', sql.VarChar(12), normalizedVendorId);
+
+  if (vendorKey !== null && vendorKey !== undefined) {
+    request.input('VendKey', sql.Int, vendorKey);
+  }
+
+  const result = await request.query(`
+    SELECT TOP (1)
+        VendKey,
+        CompanyID,
+        LTRIM(RTRIM(VendID)) AS VendID,
+        VendName
+    FROM dbo.tapVendor
+    WHERE CompanyID = @CompanyID
+      AND Status = 1
+      AND (
+            (${vendorKey !== null && vendorKey !== undefined
+                ? 'VendKey = @VendKey'
+                : '1 = 0'})
+            OR LTRIM(RTRIM(VendID)) = @VendorID
+          )
+    ORDER BY
+        CASE
+            WHEN ${
+              vendorKey !== null && vendorKey !== undefined
+                ? 'VendKey = @VendKey'
+                : '1 = 0'
+            }
+            THEN 0
+            ELSE 1
+        END;
+  `);
+
+  if (result.recordset.length === 0) {
+    throw new Error(
+      `Vendor ${normalizedVendorId || '(blank)'} / ` +
+      `VendKey ${vendorKey ?? '(blank)'} is not valid for company ${companyId}.`
+    );
+  }
+
+  return result.recordset[0];
+}
+
 function validateQuadientInvoice(payload) {
   const errors = [];
 
@@ -374,11 +428,21 @@ async function pushQuadientInvoiceToSageDim({stagingId, invoiceNumber, sessionKe
             h.InvoiceDate AS TranDate,
             @tranNo AS TranNo,
             @tranTypeId AS TranTypeID,
-            LEFT(h.VendorID, 12) AS VendID,
+            LEFT(
+                COALESCE(
+                    NULLIF(LTRIM(RTRIM(v.VendID)), ''),
+                    LTRIM(RTRIM(h.VendorID))
+                ),
+                12
+            ) AS VendID,
             @vouchNo AS VouchNo,
             0 AS ProcessStatus,
             @sessionKey AS SessionKey
         FROM dbo.QuadientInvoiceStaging h
+        LEFT JOIN dbo.tapVendor v
+          ON v.VendKey = h.VendKey
+        AND v.CompanyID = h.CompanyID
+        AND v.Status = 1
         WHERE h.QuadientInvoiceStagingID = @stagingId;
       `);
 
@@ -478,6 +542,20 @@ async function pushQuadientInvoiceToSageDim({stagingId, invoiceNumber, sessionKe
             CAST(
                 ROUND(
                     CASE
+                        WHEN l.LineType = 'PO_MATCHED'
+                            AND l.LineAmount IS NOT NULL
+                            AND l.Quantity IS NOT NULL
+                            AND l.Quantity <> 0
+                        THEN
+                            ABS(
+                                CAST(l.LineAmount AS DECIMAL(19,8))
+                                /
+                                NULLIF(
+                                    CAST(l.Quantity AS DECIMAL(19,8)),
+                                    0
+                                )
+                            )
+
                         WHEN l.LineAmount < 0
                             AND (l.UnitCost IS NULL OR l.UnitCost = 0)
                         THEN ABS(l.LineAmount)
@@ -488,7 +566,7 @@ async function pushQuadientInvoiceToSageDim({stagingId, invoiceNumber, sessionKe
                         ELSE ABS(l.UnitCost)
                     END,
                     5
-                ) AS DECIMAL(15, 5)
+                ) AS DECIMAL(15,5)
             ) AS UnitCost,
 
             LEFT(l.UnitMeasure, 6) AS UnitMeasID,
@@ -3465,19 +3543,67 @@ app.post('/quadient/invoice', async (req, res) => {
     });
   }
 
+  const rawPayloadJson = JSON.stringify(payload);
+
+  const validationErrors = validateQuadientInvoice(payload);
+
+  if (validationErrors.length > 0) {
+    writeLog('quadient-invoice.log', 'INVOICE_VALIDATION_FAILED', {
+      invoiceNumber: payload?.invoiceNumber || null,
+      errors: validationErrors,
+      payload
+    });
+
+    return res.status(400).json({
+      error: 'VALIDATION_FAILED',
+      message: 'Invoice payload failed validation',
+      details: validationErrors
+    });
+  }
+
+  const normalizedVendorId =
+    decodeHtmlEntities(payload.vendorId || '').trim();
+
+  let sageVendor;
+
+  try {
+    sageVendor = await resolveSageVendor({
+      companyId: cleanString(payload.companyId),
+      vendorId: normalizedVendorId,
+      vendorKey: payload.vendorKey ?? null
+    });
+  } catch (err) {
+    writeLog('quadient-invoice.log', 'VENDOR_VALIDATION_FAILED', {
+      invoiceNumber: payload.invoiceNumber || null,
+      companyId: payload.companyId || null,
+      vendorIdReceived: payload.vendorId || null,
+      normalizedVendorId,
+      vendorKey: payload.vendorKey ?? null,
+      message: err.message
+    });
+
+    return res.status(400).json({
+      error: 'INVALID_VENDOR',
+      message: err.message
+    });
+  }
+
+  const sageVendorId = cleanString(sageVendor.VendID);
+  const sageVendorKey = sageVendor.VendKey;
+
   writeLog('quadient-invoice.log', 'DUPLICATE_CHECK_STARTED', {
     invoiceNumber: payload.invoiceNumber || null,
     companyId: payload.companyId || null,
-    vendorId: payload.vendorId || null,
-    vendorKey: payload.vendorKey || null,
+    vendorId: sageVendorId,
+    vendorKey: sageVendorKey,
     normalizedInvoiceNumber: cleanString(payload.invoiceNumber),
     normalizedCompanyId: cleanString(payload.companyId),
-    normalizedVendorId: cleanString(payload.vendorId)
+    normalizedVendorId: sageVendorId
   });
 
   const duplicateResult = await pool.request()
     .input('companyId', sql.NVarChar(10), cleanString(payload.companyId))
-    .input('vendorId', sql.NVarChar(50), cleanString(payload.vendorId))
+    .input('vendorId', sql.NVarChar(50), sageVendorId)
     .input('invoiceNumber', sql.NVarChar(50), cleanString(payload.invoiceNumber))
     .query(`
       SELECT TOP 1
@@ -3501,7 +3627,8 @@ app.post('/quadient/invoice', async (req, res) => {
     writeLog('quadient-invoice.log', 'DUPLICATE_INVOICE_REJECTED', {
       invoiceNumber: payload.invoiceNumber,
       companyId: payload.companyId,
-      vendorId: payload.vendorId,
+      vendorId: sageVendorId,
+      vendorKey: sageVendorKey,
       existingStagingId: existing.QuadientInvoiceStagingID,
       existingProcessingStatus: existing.ProcessingStatus,
       existingCreatedAt: existing.CreatedAt
@@ -3518,25 +3645,26 @@ app.post('/quadient/invoice', async (req, res) => {
   writeLog('quadient-invoice.log', 'DUPLICATE_CHECK_RESULT', {
     invoiceNumber: cleanString(payload.invoiceNumber),
     companyId: cleanString(payload.companyId),
-    vendorId: cleanString(payload.vendorId),
+    vendorId: sageVendorId,
+    vendorKey: sageVendorKey,
     duplicateCount: duplicateResult.recordset.length,
     duplicateRows: duplicateResult.recordset
   });
 
   try {
-    const validationErrors = validateQuadientInvoice(payload);
-    if (validationErrors.length > 0) {
-      writeLog('quadient-invoice.log', 'INVOICE_VALIDATION_FAILED', {
-        invoiceNumber: payload?.invoiceNumber || null,
-        errors: validationErrors,
-        payload
-      });
-      return res.status(400).json({
-        error: 'VALIDATION_FAILED',
-        message: 'Invoice payload failed validation',
-        details: validationErrors
-      });
-    }
+    // const validationErrors = validateQuadientInvoice(payload);
+    // if (validationErrors.length > 0) {
+    //   writeLog('quadient-invoice.log', 'INVOICE_VALIDATION_FAILED', {
+    //     invoiceNumber: payload?.invoiceNumber || null,
+    //     errors: validationErrors,
+    //     payload
+    //   });
+    //   return res.status(400).json({
+    //     error: 'VALIDATION_FAILED',
+    //     message: 'Invoice payload failed validation',
+    //     details: validationErrors
+    //   });
+    // }
 
     const transaction = new sql.Transaction(pool);
 
@@ -3548,8 +3676,8 @@ app.post('/quadient/invoice', async (req, res) => {
 
       const headerResult = await headerRequest
         .input('invoiceNumber', sql.NVarChar(50), cleanString(payload.invoiceNumber))
-        .input('vendKey', sql.Int, payload.vendorKey ?? null)
-        .input('vendorId', sql.NVarChar(50), cleanString(payload.vendorId))
+        .input('vendKey', sql.Int, sageVendorKey)
+        .input('vendorId', sql.NVarChar(50), sageVendorId)
         .input('companyId', sql.NVarChar(20), cleanString(payload.companyId))
         .input('invoiceDate', sql.Date, payload.invoiceDate)
         .input('exportDate', sql.Date, payload.exportDate || null)
@@ -3558,7 +3686,7 @@ app.post('/quadient/invoice', async (req, res) => {
         .input('beanworksInvoiceUrl', sql.NVarChar(500), cleanString(payload.beanworksInvoiceUrl))
         .input('currency', sql.NVarChar(10), cleanString(payload.currency))
         .input('totalAmount', sql.Decimal(19, 4), payload.totalAmount)
-        .input('rawPayload', sql.NVarChar(sql.MAX), JSON.stringify(payload))
+        .input('rawPayload', sql.NVarChar(sql.MAX), rawPayloadJson)
         .input('invoiceType', sql.NVarChar(20), invoiceType)
         .query(`
             INSERT INTO dbo.QuadientInvoiceStaging (
@@ -3705,8 +3833,8 @@ app.post('/quadient/invoice', async (req, res) => {
       writeLog('quadient-invoice.log', 'INVOICE_STAGED', {
         stagingId,
         invoiceNumber: payload.invoiceNumber,
-        vendorKey: payload.vendorKey ?? null,
-        vendorId: payload.vendorId || null,
+        vendorKey: sageVendorKey,
+        vendorId: sageVendorId,
         companyId: payload.companyId || null,
         lineCount: payload.lines.length
       });
@@ -3721,8 +3849,8 @@ app.post('/quadient/invoice', async (req, res) => {
         processingStatus: 'ReadyForDIM',
         stagingId,
         invoiceNumber: payload.invoiceNumber,
-        vendorKey: payload.vendorKey ?? null,
-        vendorId: payload.vendorId || null,
+        vendorKey: sageVendorKey,
+        vendorId: sageVendorId,
         exportDate,
         lineCount: payload.lines.length
       });
@@ -3731,7 +3859,8 @@ app.post('/quadient/invoice', async (req, res) => {
         stagingId,
         invoiceNumber: payload.invoiceNumber,
         companyId: payload.companyId || null,
-        vendorId: payload.vendorId || null
+        vendorId: sageVendorId,
+        vendorKey: sageVendorKey
       });
 
       /*
