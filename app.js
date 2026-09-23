@@ -3713,7 +3713,10 @@ app.post('/quadient/invoice', async (req, res) => {
     try {
       const headerRequest = new sql.Request(transaction);
       const invoiceType = normalizeInvoiceType(payload.invoiceType || 'PO_MATCHED');
-
+      const processingStatus =
+        invoiceType === 'PO_MATCHED'
+          ? 'ThreeWayPending'
+          : 'ReadyForDIM';
       const headerResult = await headerRequest
         .input('invoiceNumber', sql.NVarChar(50), cleanString(payload.invoiceNumber))
         .input('vendKey', sql.Int, sageVendorKey)
@@ -3728,6 +3731,7 @@ app.post('/quadient/invoice', async (req, res) => {
         .input('totalAmount', sql.Decimal(19, 4), payload.totalAmount)
         .input('rawPayload', sql.NVarChar(sql.MAX), rawPayloadJson)
         .input('invoiceType', sql.NVarChar(20), invoiceType)
+        .input('processingStatus', sql.NVarChar(30), processingStatus)
         .query(`
             INSERT INTO dbo.QuadientInvoiceStaging (
                 InvoiceType,
@@ -3762,7 +3766,7 @@ app.post('/quadient/invoice', async (req, res) => {
                 @currency,
                 @totalAmount,
                 @rawPayload,
-                'ReadyForDIM'
+                @processingStatus
             );
     `);
 
@@ -3886,7 +3890,7 @@ app.post('/quadient/invoice', async (req, res) => {
       */
       res.status(201).json({
         status: 'received',
-        processingStatus: 'ReadyForDIM',
+        processingStatus: processingStatus,
         stagingId,
         invoiceNumber: payload.invoiceNumber,
         vendorKey: sageVendorKey,
@@ -3895,13 +3899,27 @@ app.post('/quadient/invoice', async (req, res) => {
         lineCount: payload.lines.length
       });
 
-      writeLog('quadient-invoice.log', 'INVOICE_READY_FOR_BATCH_IMPORT', {
-        stagingId,
-        invoiceNumber: payload.invoiceNumber,
-        companyId: payload.companyId || null,
-        vendorId: sageVendorId,
-        vendorKey: sageVendorKey
-      });
+      if (processingStatus === 'ReadyForDIM') {
+        writeLog('quadient-invoice.log', 'INVOICE_READY_FOR_BATCH_IMPORT', {
+          stagingId,
+          invoiceNumber: payload.invoiceNumber,
+          companyId: payload.companyId || null,
+          vendorId: sageVendorId,
+          vendorKey: sageVendorKey
+        });
+      } else {
+        writeLog('quadient-invoice.log', 'THREE_WAY_INVOICE_HELD', {
+          stagingId,
+          invoiceNumber: payload.invoiceNumber,
+          companyId: payload.companyId || null,
+          vendorId: sageVendorId,
+          vendorKey: sageVendorKey,
+          invoiceType,
+          processingStatus,
+          message:
+            'PO_MATCHED invoice held pending implementation of Sage Process Receipt of Invoice workflow.'
+        });
+      }
 
       /*
         Start Sage import after responding to Quadient.
