@@ -933,92 +933,132 @@ for (const invoice of threeWayInvoices) {
   const invoiceNumber = invoice.InvoiceNumber;
   const companyId = String(invoice.CompanyID || '').trim();
 
-  if (!companyId) {
-    const message = 'CompanyID is blank; cannot import PO_MATCHED invoice.';
+  const message =
+    'PO_MATCHED invoice held pending implementation of Sage Process Receipt of Invoice workflow.';
 
-    await markQuadientInvoiceThreeWayException({
-      stagingId,
-      message
-    });
+  await pool.request()
+    .input('stagingId', sql.Int, stagingId)
+    .input('message', sql.NVarChar(sql.MAX), message)
+    .query(`
+      UPDATE dbo.QuadientInvoiceStaging
+      SET
+          ProcessingStatus = 'ThreeWayPending',
+          ProcessingMessage = @message,
+          ProcessedAt = NULL,
+          SageImportSessionKey = NULL,
+          SageVoucherKey = NULL
+      WHERE QuadientInvoiceStagingID = @stagingId;
+    `);
 
-    failedCount += 1;
+  writeLog('quadient-invoice.log', 'THREE_WAY_HELD', {
+    stagingId,
+    invoiceNumber,
+    companyId,
+    vendorId: invoice.VendorID,
+    invoiceType: invoice.InvoiceType,
+    message
+  });
 
-    threeWayResults.push({
-      stagingId,
-      invoiceNumber,
-      status: 'three_way_failed',
-      error: 'MISSING_COMPANY_ID',
-      message
-    });
-
-    continue;
-  }
-
-  if (invoice.ProcessingStatus !== 'ReadyForDIM') {
-    const message =
-      `PO_MATCHED invoice is not ReadyForDIM and cannot be safely processed by the 3-way importer. ` +
-      `Current status=${invoice.ProcessingStatus}, SageImportSessionKey=${invoice.SageImportSessionKey || ''}.`;
-
-    await markQuadientInvoiceThreeWayException({
-      stagingId,
-      message
-    });
-
-    failedCount += 1;
-
-    threeWayResults.push({
-      stagingId,
-      invoiceNumber,
-      companyId,
-      status: 'three_way_failed',
-      error: 'PO_MATCHED_NOT_READY_FOR_DIM',
-      message
-    });
-
-    writeLog('quadient-invoice.log', 'THREE_WAY_NOT_READY_FOR_DIM', {
-      stagingId,
-      invoiceNumber,
-      companyId,
-      processingStatus: invoice.ProcessingStatus,
-      sageImportSessionKey: invoice.SageImportSessionKey
-    });
-
-    continue;
-  }
-
-  try {
-    const threeWayResult = await processThreeWayInvoice({ invoice });
-
-    importedCount += 1;
-    threeWayResults.push(threeWayResult);
-  } catch (err) {
-    failedCount += 1;
-
-    threeWayResults.push({
-      stagingId,
-      invoiceNumber,
-      companyId,
-      vendorId: invoice.VendorID,
-      status: 'three_way_failed',
-      error: err.code || 'THREE_WAY_IMPORT_FAILED',
-      message: err.message
-    });
-
-    /*
-     * processThreeWayInvoice already marks ThreeWayException and emails Accounting
-     * for validation/post-process failures. This catch is for batch accounting/logging.
-     */
-    writeLog('quadient-invoice.log', 'THREE_WAY_BATCH_ITEM_FAILED', {
-      stagingId,
-      invoiceNumber,
-      companyId,
-      vendorId: invoice.VendorID,
-      errorCode: err.code || null,
-      errorMessage: err.message,
-      stack: err.stack
-    });
-  }
+  threeWayResults.push({
+    stagingId,
+    invoiceNumber,
+    companyId,
+    vendorId: invoice.VendorID,
+    status: 'three_way_pending',
+    message
+  });
 }
+// for (const invoice of threeWayInvoices) {
+//   const stagingId = invoice.QuadientInvoiceStagingID;
+//   const invoiceNumber = invoice.InvoiceNumber;
+//   const companyId = String(invoice.CompanyID || '').trim();
+
+//   if (!companyId) {
+//     const message = 'CompanyID is blank; cannot import PO_MATCHED invoice.';
+
+//     await markQuadientInvoiceThreeWayException({
+//       stagingId,
+//       message
+//     });
+
+//     failedCount += 1;
+
+//     threeWayResults.push({
+//       stagingId,
+//       invoiceNumber,
+//       status: 'three_way_failed',
+//       error: 'MISSING_COMPANY_ID',
+//       message
+//     });
+
+//     continue;
+//   }
+
+//   if (invoice.ProcessingStatus !== 'ReadyForDIM') {
+//     const message =
+//       `PO_MATCHED invoice is not ReadyForDIM and cannot be safely processed by the 3-way importer. ` +
+//       `Current status=${invoice.ProcessingStatus}, SageImportSessionKey=${invoice.SageImportSessionKey || ''}.`;
+
+//     await markQuadientInvoiceThreeWayException({
+//       stagingId,
+//       message
+//     });
+
+//     failedCount += 1;
+
+//     threeWayResults.push({
+//       stagingId,
+//       invoiceNumber,
+//       companyId,
+//       status: 'three_way_failed',
+//       error: 'PO_MATCHED_NOT_READY_FOR_DIM',
+//       message
+//     });
+
+//     writeLog('quadient-invoice.log', 'THREE_WAY_NOT_READY_FOR_DIM', {
+//       stagingId,
+//       invoiceNumber,
+//       companyId,
+//       processingStatus: invoice.ProcessingStatus,
+//       sageImportSessionKey: invoice.SageImportSessionKey
+//     });
+
+//     continue;
+//   }
+
+//   try {
+//     const threeWayResult = await processThreeWayInvoice({ invoice });
+
+//     importedCount += 1;
+//     threeWayResults.push(threeWayResult);
+//   } catch (err) {
+//     failedCount += 1;
+
+//     threeWayResults.push({
+//       stagingId,
+//       invoiceNumber,
+//       companyId,
+//       vendorId: invoice.VendorID,
+//       status: 'three_way_failed',
+//       error: err.code || 'THREE_WAY_IMPORT_FAILED',
+//       message: err.message
+//     });
+
+//     /*
+//      * processThreeWayInvoice already marks ThreeWayException and emails Accounting
+//      * for validation/post-process failures. This catch is for batch accounting/logging.
+//      */
+//     writeLog('quadient-invoice.log', 'THREE_WAY_BATCH_ITEM_FAILED', {
+//       stagingId,
+//       invoiceNumber,
+//       companyId,
+//       vendorId: invoice.VendorID,
+//       errorCode: err.code || null,
+//       errorMessage: err.message,
+//       stack: err.stack
+//     });
+//   }
+// }
 
 /*
  * 2. Process TWO_WAY invoices through the existing company batch path.
