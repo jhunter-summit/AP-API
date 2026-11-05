@@ -2414,6 +2414,10 @@ app.get('/vendors', async (req, res) => {
           LTRIM(RTRIM(VendID)) AS vendorId,
           LTRIM(RTRIM(VendName)) AS vendorName,
           LTRIM(RTRIM(CompanyID)) AS companyId,
+          CAST(
+              CASE WHEN Status = 1 THEN 1 ELSE 0 END
+              AS bit
+          ) AS active,
           UpdateDate AS updatedAt
       FROM dbo.tapVendor
       WHERE
