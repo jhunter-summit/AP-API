@@ -159,21 +159,12 @@ async function resolveSageVendor({
     WHERE CompanyID = @CompanyID
       AND Status = 1
       AND (
-            (${vendorKey !== null && vendorKey !== undefined
-                ? 'VendKey = @VendKey'
-                : '1 = 0'})
-            OR LTRIM(RTRIM(VendID)) = @VendorID
+            ${vendorKey !== null && vendorKey !== undefined
+                ? 'VendKey = @VendKey OR'
+                : ''}
+            LTRIM(RTRIM(VendID)) = @VendorID
           )
-    ORDER BY
-        CASE
-            WHEN ${
-              vendorKey !== null && vendorKey !== undefined
-                ? 'VendKey = @VendKey'
-                : '1 = 0'
-            }
-            THEN 0
-            ELSE 1
-        END;
+    ORDER BY VendKey;
   `);
 
   if (result.recordset.length === 0) {
@@ -660,20 +651,30 @@ async function pushQuadientInvoiceToSageDim({stagingId, invoiceNumber, sessionKe
             CAST(
                 ROUND(
                     CASE
+                        -- Preserve the existing PO-matched calculation
                         WHEN l.LineType = 'PO_MATCHED'
                             AND l.LineAmount IS NOT NULL
                             AND l.Quantity IS NOT NULL
                             AND l.Quantity <> 0
                         THEN
                             ABS(
-                                CAST(l.LineAmount AS DECIMAL(19,8))
-                                /
-                                NULLIF(
-                                    CAST(l.Quantity AS DECIMAL(19,8)),
-                                    0
-                                )
+                                CAST(l.LineAmount AS DECIMAL(19,8)) /
+                                NULLIF(CAST(l.Quantity AS DECIMAL(19,8)), 0)
                             )
 
+                        -- TWO_WAY: reconcile ordinary positive-quantity lines
+                        -- to the vendor's actual extended amount
+                        WHEN h.InvoiceType = 'TWO_WAY'
+                            AND l.Quantity > 0
+                            AND l.LineAmount >= 0
+                            AND ROUND(
+                                ABS(ISNULL(l.UnitCost, 0)) * l.Quantity, 2
+                            ) <> ROUND(l.LineAmount, 2)
+                        THEN
+                            CAST(l.LineAmount AS DECIMAL(19,8)) /
+                            NULLIF(CAST(l.Quantity AS DECIMAL(19,8)), 0)
+
+                        -- Preserve existing handling of negative amounts
                         WHEN l.LineAmount < 0
                             AND (l.UnitCost IS NULL OR l.UnitCost = 0)
                         THEN ABS(l.LineAmount)
@@ -3875,7 +3876,7 @@ app.post('/quadient/invoice', async (req, res) => {
           .input('lineNumber', sql.Int, line.lineNumber ?? null)
           .input('itemKey', sql.Int, line.itemKey ?? null)
           .input('itemId', sql.NVarChar(100), cleanString(line.itemId))
-          .input('unitCost', sql.Decimal(19, 4), line.unitCost ?? null)
+          .input('unitCost', sql.Decimal(19, 5), line.unitCost ?? null)
           .input('quantity', sql.Decimal(19, 4), line.quantity ?? null)
           .input('unitMeasure', sql.NVarChar(20), cleanString(line.unitMeasure))
           //.input('unitMeasKey', sql.Int, line.unitMeasKey ?? null)
