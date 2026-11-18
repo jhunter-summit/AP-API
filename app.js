@@ -2941,8 +2941,16 @@ app.get('/purchase-orders', async (req, res) => {
       INNER JOIN dbo.tapVendor v
           ON po.VendKey = v.VendKey
       WHERE
-          (@updatedSince IS NULL OR po.TranDate >= @updatedSince)
-      ORDER BY po.TranDate DESC, po.TranID, po.POKey
+          (@updatedSince IS NULL
+            OR po.CreateDate >= @updatedSince
+            OR po.UpdateDate >= @updatedSince)
+      ORDER BY
+          CASE
+              WHEN po.UpdateDate > po.CreateDate
+                  THEN po.UpdateDate
+              ELSE po.CreateDate
+          END DESC,
+          po.POKey DESC
       OFFSET @offset ROWS
       FETCH NEXT @pageSize ROWS ONLY;
     `);
@@ -3062,13 +3070,16 @@ app.get('/receipts', async (req, res) => {
         line.UnitCost AS unitCost,
         line.TaxAmt AS taxAmount,
 
+        po.POKey AS poKey,
         LTRIM(RTRIM(po.TranID)) AS poNumber,
         pol.POLineNo AS poLineNumber,
         pol.ItemKey AS itemKey,
         LTRIM(RTRIM(pol.Description)) AS lineDescription,
 
         pold.QtyOrd AS quantityOrdered,
-        pold.QtyRcvd AS quantityReceived,
+        rld.QtyRcvd AS quantityReceived,
+        rld.QtyRcvdInSrcUOM AS quantityReceivedSourceUOM,
+        pold.QtyRcvd AS poCumulativeQuantityReceived,
         pold.QtyInvcd AS quantityInvoiced,
         pold.QtyOpenToRcv AS quantityOpenToReceive,
         pold.QtyRtrnCredit AS quantityReturnedForCredit,
@@ -3086,11 +3097,25 @@ app.get('/receipts', async (req, res) => {
         ON pol.POKey = po.POKey
       LEFT JOIN dbo.tpoPOLineDist pold
         ON pold.POLineKey = line.POLineKey
+      LEFT JOIN (
+          SELECT
+              RcvrLineKey,
+              SUM(QtyRcvd) AS QtyRcvd,
+              SUM(QtyRcvdInSrcUOM) AS QtyRcvdInSrcUOM
+          FROM dbo.tpoRcvrLineDist
+          GROUP BY RcvrLineKey
+      ) rld
+          ON rld.RcvrLineKey = line.RcvrLineKey
 
       WHERE
-        (@updatedSince IS NULL OR rcv.TranDate >= @updatedSince)
+        (@updatedSince IS NULL
+          OR rcv.CreateDate >= @updatedSince
+          OR rcv.UpdateDate >= @updatedSince)
 
-      ORDER BY rcv.TranDate DESC, rcv.TranID, line.SeqNo
+      ORDER BY rcv.CreateDate DESC,
+          rcv.TranID,
+          line.SeqNo,
+          line.RcvrLineKey
 
       OFFSET @offset ROWS
       FETCH NEXT @pageSize ROWS ONLY;

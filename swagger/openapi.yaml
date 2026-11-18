@@ -1,47 +1,24 @@
 openapi: 3.0.3
 info:
   title: Summit / Quadient / Sage 500 AP Integration API
-  version: 1.2.0
-  description: 'API for Quadient Beanworks to retrieve Sage 500 data and send invoice information back to Summit.
+  version: 1.3.0
+  description: 'API for Quadient Beanworks to retrieve Sage 500 reference and transactional data and submit
+    invoices to Summit for Sage processing.
 
 
-    Current outbound GET endpoints:
-
-    - Health / diagnostics
-
-    - Companies
-
-    - G/L Accounts
-
-    - Customers
-
-    - Vendors
-
-    - Purchase Orders
-
-    - Receipts / Receiving Info
-
-    - Open AP Invoices
-
-    - Customer Statements
+    GET endpoints include companies, G/L accounts, customers, vendors, purchase orders, receiving information,
+    open AP invoices, and customer statements. Inbound invoice POST requests are stored in Quadient staging
+    before separate Sage import processing.
 
 
-    Current inbound POST endpoints:
+    Most incremental GET endpoints support updatedSince; semantics vary by endpoint. Dates are supplied by
+    Sage. The consumer is responsible for retaining its last successful synchronization watermark and paging
+    as required. x-api-key authentication is required for protected endpoints.
 
-    - Quadient invoice staging for Sage 500 Data Import Manager processing
 
-
-    Notes:
-
-    - Date/time values are returned from Sage 500.
-
-    - Incremental endpoints support updatedSince where applicable.
-
-    - Quadient is responsible for tracking the last successful sync date.
-
-    - API key authentication uses the x-api-key request header.
-
-    - The inbound invoice endpoint stores invoice data in staging tables only. It does not write directly to Sage 500 voucher tables.
+    IMPORTANT: /receipts returns one row per receipt line; receiptKey identifies its header, receiptLineKey
+    identifies its line, poKey identifies the corresponding purchase order, and poLineKey identifies its PO
+    line. Some non-PO receiving lines can legitimately have null PO identifiers.
 
     '
 servers:
@@ -64,7 +41,8 @@ paths:
   /health:
     get:
       summary: Health check
-      description: Returns basic API health information. This endpoint may be left unauthenticated depending on deployment configuration.
+      description: Returns basic API health information. This endpoint may be left unauthenticated depending
+        on deployment configuration.
       tags:
       - Diagnostics
       responses:
@@ -74,6 +52,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+      security: []
   /db-test:
     get:
       summary: Test database connectivity
@@ -111,19 +90,26 @@ paths:
   /gl-accounts:
     get:
       summary: Get G/L account list
-      description: >
+      description: '
+
         Returns current active Sage 500 G/L accounts. Account numbers may repeat
+
         across companies/entities, so consumers should treat glAccountKey as the
+
         stable unique identifier. The endpoint supports page/pageSize pagination
+
         and also offset/pageSize pagination. If both page and offset are supplied,
+
         offset takes priority.
+
+        '
       tags:
       - GL Accounts
       parameters:
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/PageSize'
-        - $ref: '#/components/parameters/Offset'
-        - $ref: '#/components/parameters/UpdatedSince'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/Offset'
+      - $ref: '#/components/parameters/UpdatedSince'
       responses:
         '200':
           description: List of current active G/L accounts
@@ -160,20 +146,20 @@ paths:
                           example: 12345
                         companyId:
                           type: string
-                          example: "SSC"
+                          example: SSC
                         glAccountNumber:
                           type: string
-                          example: "5000-100-200"
+                          example: 5000-100-200
                         glAccountDescription:
                           type: string
-                          example: "Materials Expense"
+                          example: Materials Expense
                         status:
                           type: integer
                           example: 1
                         updatedAt:
                           type: string
                           format: date-time
-                          example: "2026-05-18T12:00:00.000Z"
+                          example: '2026-05-18T12:00:00.000Z'
               example:
                 page: 1
                 pageSize: 500
@@ -182,16 +168,12 @@ paths:
                 totalCount: 3370
                 totalPages: 7
                 data:
-                  - glAccountKey: 12345
-                    companyId: "SSC"
-                    glAccountNumber: "5000-100-200"
-                    glAccountDescription: "Materials Expense"
-                    status: 1
-                    updatedAt: "2026-05-18T12:00:00.000Z"
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/ServerError'
+                - glAccountKey: 12345
+                  companyId: SSC
+                  glAccountNumber: 5000-100-200
+                  glAccountDescription: Materials Expense
+                  status: 1
+                  updatedAt: '2026-05-18T12:00:00.000Z'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
@@ -218,7 +200,8 @@ paths:
   /vendors:
     get:
       summary: Get vendor list
-      description: Returns vendors from Sage 500. VendKey should be used for Sage/DIM writeback matching when available.
+      description: Returns vendors from Sage 500. VendKey should be used for Sage/DIM writeback matching when
+        available.
       tags:
       - Vendors
       parameters:
@@ -239,7 +222,10 @@ paths:
   /purchase-orders:
     get:
       summary: Get purchase orders
-      description: Returns purchase orders grouped by header, with line items nested under each purchase order.
+      description: Returns purchase order headers with nested lines. updatedSince selects orders with po.CreateDate
+        or po.UpdateDate on/after the supplied timestamp; poDate is the transaction date and may be backdated.
+        Pagination applies to PO headers; the count value reports records in the current page, not the total
+        matching orders.
       tags:
       - Purchase Orders
       parameters:
@@ -260,19 +246,20 @@ paths:
   /receipts:
     get:
       summary: Get receiving information
-      description: >
-        Returns receipt / receiving information from Sage 500. Receipt lines
-        include PO line identifiers, receiver line identifiers, received quantity,
-        related PO quantity fields, and G/L account key where available.
+      description: Returns a flat list of Sage receiving lines (not one object per receipt). Each line includes
+        receiptKey, receiptLineKey, poKey, poLineKey and receipt-level quantities. updatedSince selects receipt
+        headers whose CreateDate or UpdateDate is on/after the supplied timestamp, not their potentially backdated
+        receiptDate. Pagination applies to individual receipt lines. poKey and poLineKey can be null if a receipt
+        has no linked purchase order.
       tags:
-        - Receipts
+      - Receipts
       parameters:
-        - $ref: '#/components/parameters/UpdatedSince'
-        - $ref: '#/components/parameters/Page'
-        - $ref: '#/components/parameters/PageSize'
+      - $ref: '#/components/parameters/UpdatedSince'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/PageSize'
       responses:
         '200':
-          description: Receipts / receiving info
+          description: Receipt lines including PO linkage and actual receipt-line quantities
           content:
             application/json:
               schema:
@@ -284,7 +271,9 @@ paths:
   /invoices:
     get:
       summary: Get open AP invoices
-      description: Returns open AP invoice headers from Sage 500. Open is currently determined by non-zero balance. Use /invoice-lines for invoice line detail, or /invoices-with-lines for a convenience/testing response that includes nested line items.
+      description: Returns open AP invoice headers from Sage 500. Open is currently determined by non-zero
+        balance. Use /invoice-lines for invoice line detail, or /invoices-with-lines for a convenience/testing
+        response that includes nested line items.
       tags:
       - AP Invoices
       parameters:
@@ -305,7 +294,9 @@ paths:
   /invoice-lines:
     get:
       summary: Get AP invoice line items
-      description: Returns AP invoice line detail records from Sage 500. This endpoint returns line items directly and includes related invoice/vendor context plus PO quantity information from the PO line distribution table.
+      description: Returns AP invoice line detail records from Sage 500. This endpoint returns line items directly
+        and includes related invoice/vendor context plus PO quantity information from the PO line distribution
+        table.
       tags:
       - AP Invoices
       security:
@@ -387,7 +378,9 @@ paths:
   /invoices-with-lines:
     get:
       summary: Get open AP invoices with nested line items
-      description: Convenience/testing endpoint that returns open AP invoice headers from Sage 500 with nested invoice line detail records. Production integrations may prefer the separate /invoices and /invoice-lines endpoints.
+      description: Convenience/testing endpoint that returns open AP invoice headers from Sage 500 with nested
+        invoice line detail records. Production integrations may prefer the separate /invoices and /invoice-lines
+        endpoints.
       tags:
       - AP Invoices
       security:
@@ -483,16 +476,18 @@ paths:
   /quadient/invoice:
     post:
       summary: Receive one invoice from Quadient Beanworks
-      description: >
+      description: >-
         Receives invoice data from Quadient and stages it for Sage 500 import.
-        PO_MATCHED invoices may include both receipt-matched PO lines and
-        ADDITIONAL_CHARGE lines such as freight, tariff, packaging, or miscellaneous
-        charges. PO_MATCHED lines require poLineKey, rcvrLineKey, quantity, unitCost,
-        lineAmount, and glAccountKey. ADDITIONAL_CHARGE lines do not require PO or
-        receiver line keys, but they do require description, lineAmount, and
-        glAccountKey. Optional glAccountNumber and glAccountDescription may be supplied
-        for audit/display purposes. The API validates required fields and stages the
-        invoice for DIM processing; final Sage import validation is handled downstream.
+        PO_MATCHED invoices may include receipt-matched PO lines and ADDITIONAL_CHARGE
+        lines such as freight and packaging. PO_MATCHED lines require poLineKey,
+        rcvrLineKey, quantity, unitCost, lineAmount, and glAccountKey.
+        ADDITIONAL_CHARGE lines do not require PO or receipt line keys, but do
+        require lineAmount and glAccountKey. Optional G/L account descriptions
+        support audit and display. An HTTP 201 confirms acceptance into Quadient
+        staging, not successful Sage import. TWO_WAY invoices are marked ReadyForDIM;
+        PO_MATCHED invoices are marked ThreeWayPending. During DIM processing,
+        ordinary positive-quantity TWO_WAY lines may have UnitCost normalized
+        to match LineAmount at two-decimal extended-amount precision.
       tags:
       - Quadient Inbound
       requestBody:
@@ -502,84 +497,82 @@ paths:
             schema:
               $ref: '#/components/schemas/QuadientInvoiceRequest'
             examples:
-            examples:
               poMatchedWithAdditionalCharge:
                 summary: PO matched invoice with added freight/tariff charge
                 value:
-                  invoiceType: "PO_MATCHED"
-                  invoiceNumber: "TEST-GL-CHARGE-1001"
+                  invoiceType: PO_MATCHED
+                  invoiceNumber: TEST-GL-CHARGE-1001
                   vendorKey: 12345
-                  vendorId: "TESTVENDOR"
-                  invoiceDate: "2026-05-22"
-                  dueDate: "2026-06-21"
-                  memo: "Test PO invoice with GL account info on added charge"
-                  beanworksInvoiceUrl: "https://example.com/beanworks/invoice/TEST-GL-CHARGE-1001"
-                  currency: "USD"
-                  companyId: "SSC"
-                  totalAmount: 175.00
+                  vendorId: TESTVENDOR
+                  invoiceDate: '2026-05-22'
+                  dueDate: '2026-06-21'
+                  memo: Test PO invoice with GL account info on added charge
+                  beanworksInvoiceUrl: https://example.com/beanworks/invoice/TEST-GL-CHARGE-1001
+                  currency: USD
+                  companyId: SSC
+                  totalAmount: 175.0
                   lines:
-                    - lineType: "PO_MATCHED"
-                      lineNumber: 1
-                      itemKey: 1001
-                      itemId: "TESTITEM-001"
-                      unitCost: 25.00
-                      quantity: 4
-                      unitMeasure: "EA"
-                      lineAmount: 100.00
-                      poKey: 50001
-                      poNumber: "PO-TEST-001"
-                      poLineKey: 60001
-                      poLineNumber: 1
-                      rcvrLineKey: 70001
-                      description: "PO matched test line"
-                      sTaxClassKey: null
-                      department: "TEST"
-                      costCenter: "TEST"
-                      glAccountKey: 80001
-                      glAccountNumber: "PO-GL-TEST"
-                      glAccountDescription: "PO line GL account"
-                      quantityOrdered: 4
-                      quantityReceived: 4
-                      quantityInvoiced: 4
-                      quantityOpenToReceive: 0
-                      quantityReturnedForCredit: 0
-                      quantityReturnedForReplacement: 0
-                    - lineType: "ADDITIONAL_CHARGE"
-                      lineNumber: 2
-                      description: "Tariff fee"
-                      lineAmount: 75.00
-                      glAccountKey: 80002
-                      glAccountNumber: "TARIFF-GL-TEST"
-                      glAccountDescription: "Tariff and freight expense"
-                      department: "TEST"
-                      costCenter: "TEST"
-                      sTaxClassKey: null
-
+                  - lineType: PO_MATCHED
+                    lineNumber: 1
+                    itemKey: 1001
+                    itemId: TESTITEM-001
+                    unitCost: 25.0
+                    quantity: 4
+                    unitMeasure: EA
+                    lineAmount: 100.0
+                    poKey: 50001
+                    poNumber: PO-TEST-001
+                    poLineKey: 60001
+                    poLineNumber: 1
+                    rcvrLineKey: 70001
+                    description: PO matched test line
+                    sTaxClassKey: null
+                    department: TEST
+                    costCenter: TEST
+                    glAccountKey: 80001
+                    glAccountNumber: PO-GL-TEST
+                    glAccountDescription: PO line GL account
+                    quantityOrdered: 4
+                    quantityReceived: 4
+                    quantityInvoiced: 4
+                    quantityOpenToReceive: 0
+                    quantityReturnedForCredit: 0
+                    quantityReturnedForReplacement: 0
+                  - lineType: ADDITIONAL_CHARGE
+                    lineNumber: 2
+                    description: Tariff fee
+                    lineAmount: 75.0
+                    glAccountKey: 80002
+                    glAccountNumber: TARIFF-GL-TEST
+                    glAccountDescription: Tariff and freight expense
+                    department: TEST
+                    costCenter: TEST
+                    sTaxClassKey: null
               twoWayInvoice:
                 summary: 2-way / non-PO invoice
                 value:
-                  invoiceType: "TWO_WAY"
-                  invoiceNumber: "TEST-2WAY-1001"
+                  invoiceType: TWO_WAY
+                  invoiceNumber: TEST-2WAY-1001
                   vendorKey: 12345
-                  vendorId: "TESTVENDOR"
-                  invoiceDate: "2026-05-22"
-                  dueDate: "2026-06-21"
-                  memo: "Test 2-way invoice from Quadient API endpoint"
-                  beanworksInvoiceUrl: "https://example.com/beanworks/invoice/TEST-2WAY-1001"
-                  currency: "USD"
-                  companyId: "SSC"
-                  totalAmount: 125.00
+                  vendorId: TESTVENDOR
+                  invoiceDate: '2026-05-22'
+                  dueDate: '2026-06-21'
+                  memo: Test 2-way invoice from Quadient API endpoint
+                  beanworksInvoiceUrl: https://example.com/beanworks/invoice/TEST-2WAY-1001
+                  currency: USD
+                  companyId: SSC
+                  totalAmount: 125.0
                   lines:
-                    - lineType: "ADDITIONAL_CHARGE"
-                      lineNumber: 1
-                      description: "2-way invoice expense line"
-                      lineAmount: 125.00
-                      glAccountKey: 80001
-                      glAccountNumber: "2WAY-GL-TEST"
-                      glAccountDescription: "2-way expense GL account"
-                      department: "TEST"
-                      costCenter: "TEST"
-                      sTaxClassKey: null   
+                  - lineType: ADDITIONAL_CHARGE
+                    lineNumber: 1
+                    description: 2-way invoice expense line
+                    lineAmount: 125.0
+                    glAccountKey: 80001
+                    glAccountNumber: 2WAY-GL-TEST
+                    glAccountDescription: 2-way expense GL account
+                    department: TEST
+                    costCenter: TEST
+                    sTaxClassKey: null
       responses:
         '201':
           description: Invoice received and staged for DIM import
@@ -594,7 +587,7 @@ paths:
                 invoiceNumber: TEST-BEAN-1001
                 vendorKey: 123
                 vendorId: TESTVENDOR
-                exportDate : "2026-08-05"
+                exportDate: '2026-08-05'
                 lineCount: 1
         '400':
           description: Payload validation failed
@@ -619,6 +612,84 @@ paths:
               example:
                 error: INVOICE_RECEIVE_FAILED
                 message: SQL insert failed
+  /quadient/invoice/import-ready-batches:
+    post:
+      tags:
+      - Quadient Inbound
+      summary: Process eligible staged Quadient invoices through Sage import
+      description: Operational endpoint. Picks up to batchSize eligible invoices; splits TWO_WAY invoices by
+        company, export date and processing state and sends them to Sage Pending AP Voucher DIM. PO_MATCHED
+        invoices follow the separate native 3-way processor and do not fall through to TWO_WAY. This is a write
+        operation; restrict access to authorized internal clients.
+      parameters:
+      - name: batchSize
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 100
+          minimum: 1
+        description: Maximum eligible invoice rows to select from staging.
+      responses:
+        '200':
+          description: Batch processing attempt completed; inspect per-company and per-invoice results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuadientBatchImportResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: A batch import is already running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /quadient/invoice/reprocess/{stagingId}:
+    post:
+      tags:
+      - Quadient Inbound
+      summary: Mark an invoice ready for another import attempt
+      description: Operational write endpoint. Sets QuadientInvoiceStaging.ProcessingStatus to ReadyForDIM
+        and returns HTTP 202; it DOES NOT import the invoice immediately, remove previously failed Sage DIM
+        rows, or verify absence of an existing voucher. Do not invoke until old sessions and duplicates have
+        been safely reconciled.
+      parameters:
+      - name: stagingId
+        in: path
+        required: true
+        schema:
+          type: integer
+          minimum: 1
+      responses:
+        '202':
+          description: Invoice status changed to ReadyForDIM (not yet imported)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: reprocess_started
+                  stagingId:
+                    type: integer
+                  invoiceNumber:
+                    type: string
+                  vendorId:
+                    type: string
+                  companyId:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/ServerError'
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -648,21 +719,27 @@ components:
       name: pageSize
       in: query
       required: false
-      description: Number of records per page.
+      description: Number of rows or header records requested per page. Default and maximum depend on endpoint;
+        most endpoints default to 100 and cap at 500, while /gl-accounts defaults to 500 and caps at 1000.
       schema:
         type: integer
         minimum: 1
         maximum: 1000
-        default: 500
+        default: 100
       example: 500
     Offset:
       name: offset
       in: query
       required: false
-      description: >
+      description: '
+
         Zero-based record offset. If supplied, offset takes priority over page.
+
         For example, offset=0&pageSize=500 returns rows 1-500, and
+
         offset=500&pageSize=500 returns rows 501-1000.
+
+        '
       schema:
         type: integer
         minimum: 0
@@ -699,19 +776,18 @@ components:
       properties:
         status:
           type: string
-          example: ok
-        message:
-          type: string
-          example: API is running
+          example: OK
     DbTestResponse:
       type: object
       properties:
-        status:
+        CurrentDB:
           type: string
-          example: ok
-        message:
+          example: mas500_app
+        LoginUser:
           type: string
-          example: Database connection successful
+        ServerTime:
+          type: string
+          format: date-time
     Pagination:
       type: object
       properties:
@@ -806,11 +882,6 @@ components:
     Vendor:
       type: object
       properties:
-        vendKey:
-          type: integer
-          nullable: true
-          description: Sage 500 tapVendor.VendKey. Preferred identifier for Sage/DIM processing when available.
-          example: 12345
         vendorId:
           type: string
           example: INSUL
@@ -825,6 +896,15 @@ components:
           type: string
           format: date-time
           nullable: true
+        vendorKey:
+          type: integer
+          nullable: true
+          description: Sage 500 tapVendor.VendKey; identifier returned as vendorKey.
+          example: 12345
+        active:
+          type: boolean
+          description: True when Sage tapVendor.Status = 1; inactive vendors are also included.
+          example: true
     PurchaseOrderList:
       allOf:
       - $ref: '#/components/schemas/PagedResponseBase'
@@ -859,10 +939,6 @@ components:
         vendorName:
           type: string
           example: Insulectro (EFT)
-        poTotal:
-          type: number
-          nullable: true
-          example: 9572.0
         lines:
           type: array
           items:
@@ -880,10 +956,6 @@ components:
           type: integer
           nullable: true
           example: 456
-        itemId:
-          type: string
-          nullable: true
-          example: TESTITEM
         lineDescription:
           type: string
           example: Purchase order line description
@@ -897,6 +969,44 @@ components:
           type: number
           nullable: true
           example: 10
+          description: PO distribution quantity ordered (QtyOrd).
+        quantityReceived:
+          type: number
+          nullable: true
+          description: Cumulative received quantity from the PO line distribution.
+        quantityInvoiced:
+          type: number
+          nullable: true
+          description: Cumulative quantity invoiced for the PO line.
+        quantityOpenToReceive:
+          type: number
+          nullable: true
+          description: Quantity still open to receive on the PO line.
+        quantityReturnedForCredit:
+          type: number
+          nullable: true
+          description: Quantity returned for credit on the PO line.
+        quantityReturnedForReplacement:
+          type: number
+          nullable: true
+          description: Quantity returned for replacement on the PO line.
+        glAccountKey:
+          type: integer
+          nullable: true
+          description: GL account key from PO line distribution.
+        glAccountNumber:
+          type: string
+          nullable: true
+          description: GL account number associated with the PO line distribution.
+        glAccountDescription:
+          type: string
+          nullable: true
+          description: Description of the GL account.
+        calculatedQuantityOrdered:
+          type: number
+          nullable: true
+          description: Calculated as lineAmount / unitCost when unitCost is nonzero; can have fractional/rounding
+            variance.
     ReceiptList:
       type: object
       properties:
@@ -915,58 +1025,48 @@ components:
               example: 100
       example:
         data:
-          - receiptKey: 34300
-            receiptNumber: "0000034300"
-            receiptDate: "2026-04-27T00:00:00.000Z"
-            companyId: "SSC"
-            vendorId: "INSUL"
-            vendorName: "Insulectro (EFT)"
-            receiptLineKey: 149778
-            receiptLineNumber: 1
-            poLineKey: 147845
-            unitCost: 2.74
-            taxAmount: 0
-            poNumber: "0000071995"
-            poLineNumber: 1
-            itemKey: 456
-            lineDescription: "Paco Plus 18x24 8-Hole"
-            quantityOrdered: 600
-            quantityReceived: 600
-            quantityInvoiced: 0
-            quantityOpenToReceive: 0
-            quantityReturnedForCredit: 0
-            quantityReturnedForReplacement: 0
-            glAccountKey: 568000
+        - receiptKey: 182263
+          receiptNumber: 0000077715-RG
+          receiptDate: '2026-11-02T00:00:00.000Z'
+          companyId: MEI
+          receiptLineKey: 417203
+          poKey: 192059
+          poLineKey: 1390863
+          poNumber: PO-0000063779
+          quantityReceived: 1500
+          quantityReceivedSourceUOM: 1500
+          poCumulativeQuantityReceived: 1500
         pagination:
           page: 1
           pageSize: 100
-
     Receipt:
       type: object
       properties:
         receiptKey:
           type: integer
           example: 34300
+          description: Sage tpoReceiver.RcvrKey; identifies the receiving transaction header.
         receiptNumber:
           type: string
-          example: "0000034300"
+          example: '0000034300'
         receiptDate:
           type: string
           format: date-time
           nullable: true
-          example: "2026-04-27T00:00:00.000Z"
+          example: '2026-04-27T00:00:00.000Z'
         companyId:
           type: string
-          example: "SSC"
+          example: SSC
         vendorId:
           type: string
-          example: "INSUL"
+          example: INSUL
         vendorName:
           type: string
-          example: "Insulectro (EFT)"
+          example: Insulectro (EFT)
         receiptLineKey:
           type: integer
           example: 149778
+          description: Sage tpoRcvrLine.RcvrLineKey; unique receipt line identifier.
         receiptLineNumber:
           type: integer
           nullable: true
@@ -975,6 +1075,7 @@ components:
           type: integer
           nullable: true
           example: 147845
+          description: Sage tpoRcvrLine.POLineKey; identifies the PO line associated with this receiver line.
         unitCost:
           type: number
           nullable: true
@@ -983,10 +1084,16 @@ components:
           type: number
           nullable: true
           example: 0
+        poKey:
+          type: integer
+          nullable: true
+          description: Sage tpoPurchOrder.POKey; purchase-order header linkage key required for Quadient to
+            associate goods receipts with POs. Null when no linked PO is resolved.
+          example: 192059
         poNumber:
           type: string
           nullable: true
-          example: "0000071995"
+          example: 0000071995
         poLineNumber:
           type: integer
           nullable: true
@@ -998,8 +1105,7 @@ components:
         lineDescription:
           type: string
           nullable: true
-          example: "Paco Plus 18x24 8-Hole"
-
+          example: Paco Plus 18x24 8-Hole
         quantityOrdered:
           type: number
           nullable: true
@@ -1008,8 +1114,19 @@ components:
         quantityReceived:
           type: number
           nullable: true
-          description: Quantity received from Sage PO line distribution data.
+          description: 'Actual quantity received on this receipt line: SUM(tpoRcvrLineDist.QtyRcvd), grouped
+            by RcvrLineKey. NOT the cumulative PO received quantity.'
           example: 600
+        quantityReceivedSourceUOM:
+          type: number
+          nullable: true
+          description: Actual received quantity for this receiver line in source unit of measure; SUM(tpoRcvrLineDist.QtyRcvdInSrcUOM)
+            grouped by RcvrLineKey.
+        poCumulativeQuantityReceived:
+          type: number
+          nullable: true
+          description: Cumulative quantity received for the linked PO line; tpoPOLineDist.QtyRcvd. This is
+            NOT the quantity of this individual goods receipt.
         quantityInvoiced:
           type: number
           nullable: true
@@ -1034,7 +1151,7 @@ components:
           type: integer
           nullable: true
           description: Sage G/L account key from PO line distribution.
-          example: 568000   
+          example: 568000
     InvoiceList:
       allOf:
       - $ref: '#/components/schemas/PagedResponseBase'
@@ -1159,17 +1276,25 @@ components:
           example: INV-12345
         invoiceType:
           type: string
-          description: >
+          description: '
+
             Invoice processing type. Official values are PO_MATCHED and TWO_WAY.
+
             PO_MATCHED is used for PO/receipt matched invoices and may also include
+
             ADDITIONAL_CHARGE lines such as freight, tariff, packaging, or miscellaneous
+
             charges. TWO_WAY is used for non-PO / 2-way invoices. If omitted, the API
+
             treats the invoice as PO_MATCHED. The API also normalizes common variants
+
             such as "TWO WAY", "2 WAY", "NON_PO", "THREE WAY", and "3 WAY".
+
+            '
           enum:
-            - PO_MATCHED
-            - TWO_WAY
-          example: "PO_MATCHED"
+          - PO_MATCHED
+          - TWO_WAY
+          example: PO_MATCHED
         vendorKey:
           type: integer
           nullable: true
@@ -1185,10 +1310,7 @@ components:
           type: string
           format: date
           example: '2026-05-07'
-          description: >
-            Original invoice date from the supplier invoice. This value is retained for
-            audit/reference purposes. For Sage Pending AP Voucher import dates, Summit
-            uses exportDate when provided.
+          description: Original vendor invoice date. Used as Sage Pending AP Voucher TranDate and InvcRcptDate.
         dueDate:
           type: string
           format: date
@@ -1219,32 +1341,29 @@ components:
         exportDate:
           type: string
           format: date
-          example: "2026-08-05"
-          description: >
-            Date the invoice batch was exported/sent from Quadient to Summit.
-            Summit uses this value as the Sage AP invoice date, invoice received date,
-            and posting date for Pending AP Voucher import. If omitted, Summit defaults
-            it to the API receive date.
+          example: '2026-08-05'
+          description: Quadient export date; used as Sage Pending AP Voucher PostDate if supplied. If absent
+            the API stores the receive date as ExportDate.
         lines:
           type: array
           minItems: 1
           items:
             $ref: '#/components/schemas/QuadientInvoiceLineRequest'
-      description: One invoice per POST request. Either vendorKey or vendorId must be supplied; vendorKey is preferred for Sage/DIM processing.
+      description: One invoice per POST request. Either vendorKey or vendorId must be supplied; vendorKey is
+        preferred for Sage/DIM processing.
     QuadientInvoiceLineRequest:
       oneOf:
-        - $ref: '#/components/schemas/QuadientPoMatchedInvoiceLineRequest'
-        - $ref: '#/components/schemas/QuadientTwoWayInvoiceLineRequest'
-
+      - $ref: '#/components/schemas/QuadientPoMatchedInvoiceLineRequest'
+      - $ref: '#/components/schemas/QuadientTwoWayInvoiceLineRequest'
     QuadientPoMatchedInvoiceLineRequest:
       type: object
       required:
-        - unitCost
-        - quantity
-        - lineAmount
-        - poLineKey
-        - rcvrLineKey
-        - glAccountKey
+      - unitCost
+      - quantity
+      - lineAmount
+      - poLineKey
+      - rcvrLineKey
+      - glAccountKey
       properties:
         lineNumber:
           type: integer
@@ -1253,38 +1372,47 @@ components:
         lineType:
           type: string
           nullable: true
-          description: >
-            Optional line type. Use PO_MATCHED for receipt-matched PO lines.
-            Use ADDITIONAL_CHARGE for freight, tariff, packaging, or miscellaneous
-            charges on a PO invoice that do not have poLineKey or rcvrLineKey.
-            If omitted, the API infers the line type from whether poLineKey or
-            rcvrLineKey is present.
-          enum:
-            - PO_MATCHED
-            - ADDITIONAL_CHARGE
-          example: "PO_MATCHED"
+          description: '
 
+            Optional line type. Use PO_MATCHED for receipt-matched PO lines.
+
+            Use ADDITIONAL_CHARGE for freight, tariff, packaging, or miscellaneous
+
+            charges on a PO invoice that do not have poLineKey or rcvrLineKey.
+
+            If omitted, the API infers the line type from whether poLineKey or
+
+            rcvrLineKey is present.
+
+            '
+          enum:
+          - PO_MATCHED
+          - ADDITIONAL_CHARGE
+          example: PO_MATCHED
         glAccountKey:
           type: integer
-          description: >
-            Sage G/L account key. Required for all incoming invoice lines,
-            including PO-matched lines and additional charge lines.
+          description: Sage 500 G/L account key for this invoice line.
           example: 80001
-
         glAccountNumber:
           type: string
           nullable: true
-          description: >
-            Optional display G/L account number supplied by Quadient for audit/display.
-            The integration key remains glAccountKey.
-          example: "5000-100-200"
+          description: '
 
+            Optional display G/L account number supplied by Quadient for audit/display.
+
+            The integration key remains glAccountKey.
+
+            '
+          example: 5000-100-200
         glAccountDescription:
           type: string
           nullable: true
-          description: >
+          description: '
+
             Optional display G/L account description supplied by Quadient for audit/display.
-          example: "Freight and tariff expense"
+
+            '
+          example: Freight and tariff expense
         itemKey:
           type: integer
           nullable: true
@@ -1292,7 +1420,7 @@ components:
         itemId:
           type: string
           nullable: true
-          example: "TESTITEM"
+          example: TESTITEM
         unitCost:
           type: number
           format: decimal
@@ -1304,7 +1432,7 @@ components:
         unitMeasure:
           type: string
           nullable: true
-          example: "EA"
+          example: EA
         lineAmount:
           type: number
           format: decimal
@@ -1316,7 +1444,7 @@ components:
         poNumber:
           type: string
           nullable: true
-          example: "PO-TEST-001"
+          example: PO-TEST-001
         poLineKey:
           type: integer
           description: Sage 500 tpoPOLine.POLineKey.
@@ -1332,7 +1460,7 @@ components:
         description:
           type: string
           nullable: true
-          example: "Test PO-matched invoice line"
+          example: Test PO-matched invoice line
         sTaxClassKey:
           type: integer
           nullable: true
@@ -1340,15 +1468,11 @@ components:
         department:
           type: string
           nullable: true
-          example: "TEST"
+          example: TEST
         costCenter:
           type: string
           nullable: true
-          example: "TEST"
-        glAccountKey:
-          type: integer
-          description: Sage 500 G/L account key for this invoice line.
-          example: 80001
+          example: TEST
         quantityOrdered:
           type: number
           nullable: true
@@ -1373,13 +1497,11 @@ components:
           type: number
           nullable: true
           example: 0
-
     QuadientTwoWayInvoiceLineRequest:
       type: object
       required:
-        - lineAmount
-        - glAccountKey
-        - description
+      - lineAmount
+      - glAccountKey
       properties:
         lineNumber:
           type: integer
@@ -1388,17 +1510,22 @@ components:
         lineType:
           type: string
           nullable: true
-          description: >
+          description: '
+
             Optional line type. TWO_WAY invoice lines are treated as non-PO /
+
             additional charge lines. If omitted, the API treats the line as
+
             ADDITIONAL_CHARGE.
+
+            '
           enum:
-            - ADDITIONAL_CHARGE
-          example: "ADDITIONAL_CHARGE"
+          - ADDITIONAL_CHARGE
+          example: ADDITIONAL_CHARGE
         description:
           type: string
-          description: Description is required for TWO_WAY invoice lines.
-          example: "2-way invoice expense line"
+          description: Optional; if omitted, API uses the invoice memo or a generated fallback description.
+          example: 2-way invoice expense line
         lineAmount:
           type: number
           format: decimal
@@ -1410,16 +1537,23 @@ components:
         glAccountNumber:
           type: string
           nullable: true
-          description: >
+          description: '
+
             Optional display G/L account number supplied by Quadient for audit/display.
+
             The integration key remains glAccountKey.
-          example: "5000-100-200"
+
+            '
+          example: 5000-100-200
         glAccountDescription:
           type: string
           nullable: true
-          description: >
+          description: '
+
             Optional display G/L account description supplied by Quadient for audit/display.
-          example: "2-way expense GL account"
+
+            '
+          example: 2-way expense GL account
         sTaxClassKey:
           type: integer
           nullable: true
@@ -1427,11 +1561,11 @@ components:
         department:
           type: string
           nullable: true
-          example: "TEST"
+          example: TEST
         costCenter:
           type: string
           nullable: true
-          example: "TEST"
+          example: TEST
         itemKey:
           type: integer
           nullable: true
@@ -1453,7 +1587,7 @@ components:
         unitMeasure:
           type: string
           nullable: true
-          example: null    
+          example: null
     QuadientInvoiceResponse:
       type: object
       properties:
@@ -1480,6 +1614,10 @@ components:
         lineCount:
           type: integer
           example: 3
+        exportDate:
+          type: string
+          format: date
+          description: Export date stored for the staged invoice.
     ValidationError:
       type: object
       properties:
@@ -1583,66 +1721,66 @@ components:
           type: number
           nullable: true
           example: 12.5
-        lineAmount: &id011
+        lineAmount: &id010
           type: number
           example: 125
-        sTaxClassKey: &id012
+        sTaxClassKey: &id011
           type: integer
           nullable: true
           example: null
-        matchStatus: &id013
+        matchStatus: &id012
           type: integer
           example: 2
-        returnType: &id014
+        returnType: &id013
           type: integer
           example: 0
-        targetCompanyId: &id015
+        targetCompanyId: &id014
           type: string
           example: '001'
-        quantityOrdered: &id016
+        quantityOrdered: &id015
           type: number
           nullable: true
           description: Quantity ordered from tpoPOLineDist.QtyOrd.
           example: 10
-        quantityReceived: &id017
+        quantityReceived: &id016
           type: number
           nullable: true
           description: Quantity received from tpoPOLineDist.QtyRcvd.
           example: 10
-        quantityInvoiced: &id018
+        quantityInvoiced: &id017
           type: number
           nullable: true
           description: Quantity invoiced from tpoPOLineDist.QtyInvcd.
           example: 10
-        quantityOpenToReceive: &id019
+        quantityOpenToReceive: &id018
           type: number
           nullable: true
           description: Quantity open to receive from tpoPOLineDist.QtyOpenToRcv.
           example: 0
-        quantityReturnedForCredit: &id020
+        quantityReturnedForCredit: &id019
           type: number
           nullable: true
           description: Quantity returned for credit from tpoPOLineDist.QtyRtrnCredit.
           example: 0
-        quantityReturnedForReplacement: &id021
+        quantityReturnedForReplacement: &id020
           type: number
           nullable: true
           description: Quantity returned for replacement from tpoPOLineDist.QtyRtrnReplacement.
           example: 0
-        glAccountKey: &id022
+        glAccountKey: &id021
           type: integer
           nullable: true
           description: Sage G/L account key from tpoPOLineDist.GLAcctKey.
           example: 12345
-                glAccountNumber:
+        glAccountNumber:
           type: string
           nullable: true
-          example: "5000-100-200"
+          example: 5000-100-200
         glAccountDescription:
           type: string
           nullable: true
-          example: "Raw Materials Expense"
-        calculatedInvoiceQuantity: &id023
+          example: Raw Materials Expense
+        calculatedInvoiceQuantity: &id022
           type: number
           nullable: true
           description: Calculated as lineAmount / unitCost when unitCost is nonzero.
@@ -1668,19 +1806,19 @@ components:
         extendedComment: *id007
         unitCost: *id008
         unitCostExact: *id009
-        lineAmount: *id011
-        sTaxClassKey: *id012
-        matchStatus: *id013
-        returnType: *id014
-        targetCompanyId: *id015
-        quantityOrdered: *id016
-        quantityReceived: *id017
-        quantityInvoiced: *id018
-        quantityOpenToReceive: *id019
-        quantityReturnedForCredit: *id020
-        quantityReturnedForReplacement: *id021
-        glAccountKey: *id022
-        calculatedInvoiceQuantity: *id023
+        lineAmount: *id010
+        sTaxClassKey: *id011
+        matchStatus: *id012
+        returnType: *id013
+        targetCompanyId: *id014
+        quantityOrdered: *id015
+        quantityReceived: *id016
+        quantityInvoiced: *id017
+        quantityOpenToReceive: *id018
+        quantityReturnedForCredit: *id019
+        quantityReturnedForReplacement: *id020
+        glAccountKey: *id021
+        calculatedInvoiceQuantity: *id022
     InvoiceWithLines:
       type: object
       properties:
@@ -1756,3 +1894,38 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/InvoiceLineNested'
+    QuadientBatchImportResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: completed
+        totalReady:
+          type: integer
+        twoWayReadyCount:
+          type: integer
+        threeWayReadyCount:
+          type: integer
+        unsupportedInvoiceCount:
+          type: integer
+        companyBatchCount:
+          type: integer
+        importedCount:
+          type: integer
+        failedCount:
+          type: integer
+        deferredCount:
+          type: integer
+        companyResults:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            description: Company import batch result; includes sessionKey, resultCode, resultMessage, and per-invoice
+              results.
+        threeWayResults:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            description: Per-invoice native three-way result.
