@@ -3695,6 +3695,14 @@ app.post('/quadient/test-error-email', async (req, res) => {
   }
 });
 
+function makeInvoiceIntakeError(statusCode, errorCode, message, extra = {}) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  err.errorCode = errorCode;
+  err.extra = extra;
+  return err;
+}
+
 app.post('/quadient/invoice', async (req, res) => {
   let payload = req.body;
 
@@ -3715,7 +3723,7 @@ app.post('/quadient/invoice', async (req, res) => {
 
     writeLog('quadient-invoice.log', 'INVOICE_PAYLOAD_ARRAY_UNWRAPPED', {
       arrayLength: 1,
-      invoiceNumber: payload.invoiceNumber || null
+      invoiceNumber: payload?.invoiceNumber || null
     });
   }
 
@@ -3767,107 +3775,203 @@ app.post('/quadient/invoice', async (req, res) => {
   const sageVendorId = cleanString(sageVendor.VendID);
   const sageVendorKey = sageVendor.VendKey;
 
-  writeLog('quadient-invoice.log', 'DUPLICATE_CHECK_STARTED', {
-    invoiceNumber: payload.invoiceNumber || null,
-    companyId: payload.companyId || null,
-    vendorId: sageVendorId,
-    vendorKey: sageVendorKey,
-    normalizedInvoiceNumber: cleanString(payload.invoiceNumber),
-    normalizedCompanyId: cleanString(payload.companyId),
-    normalizedVendorId: sageVendorId
-  });
+  // Duplicate detection and all staging mutations happen under one SQL
+  // transaction. The transaction-scoped application lock also protects
+  // concurrent first submissions for the same company/vendor/invoice key.
+  const transaction = new sql.Transaction(pool);
+  let transactionStarted = false;
 
-  const duplicateResult = await pool.request()
-    .input('companyId', sql.NVarChar(10), cleanString(payload.companyId))
-    .input('vendorId', sql.NVarChar(50), sageVendorId)
-    .input('invoiceNumber', sql.NVarChar(50), cleanString(payload.invoiceNumber))
-    .query(`
-      SELECT TOP 1
+  try {
+    await transaction.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
+    transactionStarted = true;
+
+    const invoiceType = normalizeInvoiceType(payload.invoiceType || 'PO_MATCHED');
+    const processingStatus = invoiceType === 'PO_MATCHED'
+      ? 'ThreeWayPending'
+      : 'ReadyForDIM';
+    const companyId = cleanString(payload.companyId);
+    const invoiceNumber = cleanString(payload.invoiceNumber);
+    const tranNo = invoiceNumber.substring(0, 15);
+
+    const invoiceIdentity = [companyId, sageVendorId, invoiceNumber]
+      .map(value => String(value).trim().toUpperCase()).join('|');
+    const lockResource = 'QuadientInvoice:' + crypto
+      .createHash('sha256').update(invoiceIdentity).digest('hex');
+
+    const lockResult = await new sql.Request(transaction)
+      .input('resource', sql.NVarChar(255), lockResource)
+      .query(`
+        DECLARE @LockResult int;
+        EXEC @LockResult = sys.sp_getapplock
+          @Resource = @resource,
+          @LockMode = 'Exclusive',
+          @LockOwner = 'Transaction',
+          @LockTimeout = 15000;
+        SELECT @LockResult AS LockResult;
+      `);
+    if (lockResult.recordset[0].LockResult < 0) {
+      throw makeInvoiceIntakeError(503, 'INVOICE_LOCK_TIMEOUT',
+        'Could not obtain an exclusive invoice-receipt lock. Retry later.');
+    }
+
+    const duplicateResult = await new sql.Request(transaction)
+      .input('companyId', sql.NVarChar(10), companyId)
+      .input('vendorId', sql.NVarChar(50), sageVendorId)
+      .input('invoiceNumber', sql.NVarChar(50), invoiceNumber)
+      .query(`
+        SELECT
           QuadientInvoiceStagingID,
           InvoiceNumber,
           CompanyID,
           VendorID,
           VendKey,
+          InvoiceType,
           ProcessingStatus,
+          ProcessingMessage,
+          SageImportSessionKey,
+          SageVoucherKey,
+          RawPayload,
           CreatedAt
-      FROM dbo.QuadientInvoiceStaging WITH (UPDLOCK, HOLDLOCK)
-      WHERE UPPER(LTRIM(RTRIM(CompanyID))) = UPPER(LTRIM(RTRIM(@companyId)))
-        AND UPPER(LTRIM(RTRIM(VendorID))) = UPPER(LTRIM(RTRIM(@vendorId)))
-        AND UPPER(LTRIM(RTRIM(InvoiceNumber))) = UPPER(LTRIM(RTRIM(@invoiceNumber)))
-      ORDER BY QuadientInvoiceStagingID DESC;
-    `);
+        FROM dbo.QuadientInvoiceStaging WITH (UPDLOCK, HOLDLOCK)
+        WHERE UPPER(LTRIM(RTRIM(CompanyID))) = UPPER(LTRIM(RTRIM(@companyId)))
+          AND UPPER(LTRIM(RTRIM(VendorID))) = UPPER(LTRIM(RTRIM(@vendorId)))
+          AND UPPER(LTRIM(RTRIM(InvoiceNumber))) = UPPER(LTRIM(RTRIM(@invoiceNumber)))
+        ORDER BY QuadientInvoiceStagingID DESC;
+      `);
 
-  if (duplicateResult.recordset.length > 0) {
-    const existing = duplicateResult.recordset[0];
+    // Fail closed if historical duplicate rows already exist. We should not
+    // guess which one is authoritative, even if the newest one has failed.
+    if (duplicateResult.recordset.length > 1) {
+      throw makeInvoiceIntakeError(409, 'MULTIPLE_EXISTING_INVOICES',
+        'Multiple staging rows exist for this invoice. Manual review required.');
+    }
 
-    writeLog('quadient-invoice.log', 'DUPLICATE_INVOICE_REJECTED', {
-      invoiceNumber: payload.invoiceNumber,
-      companyId: payload.companyId,
-      vendorId: sageVendorId,
-      vendorKey: sageVendorKey,
-      existingStagingId: existing.QuadientInvoiceStagingID,
-      existingProcessingStatus: existing.ProcessingStatus,
-      existingCreatedAt: existing.CreatedAt
-    });
+    const existing = duplicateResult.recordset[0] || null;
+    let previousStatus = null;
+    let stagingId;
+    let exportDate;
 
-    return res.status(409).json({
-      error: 'DUPLICATE_INVOICE',
-      message: 'Invoice has already been received for this company/vendor/invoice number.',
-      existingStagingId: existing.QuadientInvoiceStagingID,
-      processingStatus: existing.ProcessingStatus,
-      createdAt: existing.CreatedAt
-    });
-  }
-  writeLog('quadient-invoice.log', 'DUPLICATE_CHECK_RESULT', {
-    invoiceNumber: cleanString(payload.invoiceNumber),
-    companyId: cleanString(payload.companyId),
-    vendorId: sageVendorId,
-    vendorKey: sageVendorKey,
-    duplicateCount: duplicateResult.recordset.length,
-    duplicateRows: duplicateResult.recordset
-  });
+    if (existing) {
+      previousStatus = existing.ProcessingStatus;
 
-  try {
-    // const validationErrors = validateQuadientInvoice(payload);
-    // if (validationErrors.length > 0) {
-    //   writeLog('quadient-invoice.log', 'INVOICE_VALIDATION_FAILED', {
-    //     invoiceNumber: payload?.invoiceNumber || null,
-    //     errors: validationErrors,
-    //     payload
-    //   });
-    //   return res.status(400).json({
-    //     error: 'VALIDATION_FAILED',
-    //     message: 'Invoice payload failed validation',
-    //     details: validationErrors
-    //   });
-    // }
-
-    const transaction = new sql.Transaction(pool);
-
-    await transaction.begin();
-
-    try {
-      const headerRequest = new sql.Request(transaction);
-      const invoiceType = normalizeInvoiceType(payload.invoiceType || 'PO_MATCHED');
-      // const processingStatus =
-      //   invoiceType === 'PO_MATCHED'
-      //     ? 'ThreeWayPending'
-      //     : 'ReadyForDIM';
-      let processingStatus;
-
-      if (invoiceType === 'PO_MATCHED') {
-        // Keep 3-way invoices out of the existing DIM/AP voucher importer.
-        // They will remain here until the new native Receipt-of-Invoice
-        // processor is explicitly invoked.
-        processingStatus = 'ThreeWayPending';
-      } else {
-        processingStatus = 'ReadyForDIM';
+      // Phase 1: only the native three-way failure state. Other failures
+      // may have left DIM staging, import sessions, or vouchers behind.
+      if (existing.ProcessingStatus !== 'ThreeWayError' ||
+          normalizeInvoiceType(existing.InvoiceType) !== 'PO_MATCHED' ||
+          existing.SageImportSessionKey != null ||
+          existing.SageVoucherKey != null ||
+          Number(existing.VendKey) !== Number(sageVendorKey)) {
+        throw makeInvoiceIntakeError(409, 'DUPLICATE_INVOICE',
+          'Invoice already received; its state is not eligible for automatic replacement.', {
+            existingStagingId: existing.QuadientInvoiceStagingID,
+            processingStatus: previousStatus
+          });
       }
-      const headerResult = await headerRequest
-        .input('invoiceNumber', sql.NVarChar(50), cleanString(payload.invoiceNumber))
+
+      // On a correction, the type must be explicitly sent by Quadient.
+      // Never infer PO_MATCHED from a missing field on a replacement.
+      if (!cleanString(payload.invoiceType)) {
+        throw makeInvoiceIntakeError(400, 'INVOICE_TYPE_REQUIRED_ON_CORRECTION',
+          'Corrected invoice submissions must explicitly provide invoiceType.');
+      }
+
+      // Do not erase or retry an unchanged failed payload. A corrected
+      // submission must actually change the original JSON.
+      if (existing.RawPayload === rawPayloadJson) {
+        throw makeInvoiceIntakeError(409, 'UNCHANGED_FAILED_INVOICE',
+          'Invoice previously failed and the resubmitted payload is unchanged.', {
+            existingStagingId: existing.QuadientInvoiceStagingID,
+            processingStatus: previousStatus
+          });
+      }
+
+      // Sage checks are deliberately conservative. Native Sage processing
+      // may have committed before a later API step failed; null staging
+      // keys alone are NOT proof that no voucher exists.
+      const sageCheck = await new sql.Request(transaction)
+        .input('companyId', sql.VarChar(3), companyId)
+        .input('tranNo', sql.VarChar(15), tranNo)
         .input('vendKey', sql.Int, sageVendorKey)
-        .input('vendorId', sql.NVarChar(50), sageVendorId)
-        .input('companyId', sql.NVarChar(20), cleanString(payload.companyId))
+        .input('stagingId', sql.Int, existing.QuadientInvoiceStagingID)
+        .query(`
+          SELECT
+            CASE WHEN EXISTS (
+              SELECT 1 FROM dbo.tapPendVoucher
+              WHERE CompanyID = @companyId AND TranNo = @tranNo
+            ) OR EXISTS (
+              SELECT 1 FROM dbo.tapVoucher
+              WHERE CompanyID = @companyId AND TranNo = @tranNo
+            ) OR EXISTS (
+              SELECT 1 FROM dbo.tapVoucherLog
+              WHERE CompanyID = @companyId AND TranNo = @tranNo
+            ) THEN 1 ELSE 0 END AS SageVoucherExists,
+            CASE WHEN EXISTS (
+              SELECT 1 FROM dbo.StgPendVoucher sp
+              WHERE sp.TranNo = @tranNo
+                AND (
+                  NOT EXISTS (
+                    SELECT 1 FROM dbo.tsmMigrateSession ms
+                    WHERE ms.MigrateSessionKey = sp.SessionKey
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM dbo.tsmMigrateSession ms
+                    WHERE ms.MigrateSessionKey = sp.SessionKey
+                      AND ms.CompanyID = @companyId
+                  )
+                )
+            ) OR EXISTS (
+              SELECT 1 FROM dbo.StgVoucherDetl sd
+              WHERE sd.TranNo = @tranNo
+                AND (
+                  NOT EXISTS (
+                    SELECT 1 FROM dbo.tsmMigrateSession ms
+                    WHERE ms.MigrateSessionKey = sd.SessionKey
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM dbo.tsmMigrateSession ms
+                    WHERE ms.MigrateSessionKey = sd.SessionKey
+                      AND ms.CompanyID = @companyId
+                  )
+                )
+            ) THEN 1 ELSE 0 END AS DimStagingExists;
+        `);
+      if (sageCheck.recordset[0].SageVoucherExists ||
+          sageCheck.recordset[0].DimStagingExists) {
+        throw makeInvoiceIntakeError(409, 'SAGE_STATE_REQUIRES_REVIEW',
+          'Sage voucher or DIM staging records may exist. Automatic replacement prohibited.', {
+            existingStagingId: existing.QuadientInvoiceStagingID,
+            processingStatus: previousStatus
+          });
+      }
+
+      stagingId = existing.QuadientInvoiceStagingID;
+
+      // Archive both the exact original payload and the normalized staged
+      // lines BEFORE modifying either. All changes roll back together.
+      await new sql.Request(transaction)
+        .input('stagingId', sql.Int, stagingId)
+        .input('previousType', sql.NVarChar(20), existing.InvoiceType)
+        .input('previousStatus', sql.NVarChar(50), previousStatus)
+        .input('previousMessage', sql.NVarChar(sql.MAX), existing.ProcessingMessage)
+        .input('previousPayload', sql.NVarChar(sql.MAX), existing.RawPayload)
+        .input('replacementPayload', sql.NVarChar(sql.MAX), rawPayloadJson)
+        .query(`
+          INSERT INTO dbo.QuadientInvoiceResubmissionHistory
+            (QuadientInvoiceStagingID, PreviousInvoiceType,
+             PreviousProcessingStatus, PreviousProcessingMessage,
+             PreviousRawPayload, PreviousStagedLinesJson, ReplacementRawPayload)
+          SELECT @stagingId, @previousType, @previousStatus,
+                 @previousMessage, @previousPayload,
+                 (SELECT l.* FROM dbo.QuadientInvoiceLineStaging l
+                  WHERE l.QuadientInvoiceStagingID = @stagingId
+                  ORDER BY l.LineNumber, l.QuadientInvoiceLineStagingID
+                  FOR JSON PATH, INCLUDE_NULL_VALUES),
+                 @replacementPayload;
+        `);
+
+      const updated = await new sql.Request(transaction)
+        .input('stagingId', sql.Int, stagingId)
+        .input('vendKey', sql.Int, sageVendorKey)
         .input('invoiceDate', sql.Date, payload.invoiceDate)
         .input('exportDate', sql.Date, payload.exportDate || null)
         .input('dueDate', sql.Date, payload.dueDate)
@@ -3879,45 +3983,74 @@ app.post('/quadient/invoice', async (req, res) => {
         .input('invoiceType', sql.NVarChar(20), invoiceType)
         .input('processingStatus', sql.NVarChar(30), processingStatus)
         .query(`
-            INSERT INTO dbo.QuadientInvoiceStaging (
-                InvoiceType,
-                InvoiceNumber,
-                VendKey,
-                VendorID,
-                CompanyID,
-                InvoiceDate,
-                ExportDate,
-                DueDate,
-                Memo,
-                BeanworksInvoiceURL,
-                Currency,
-                TotalAmount,
-                RawPayload,
-                ProcessingStatus
-            )
-            OUTPUT
-                  INSERTED.QuadientInvoiceStagingID AS stagingId,
-                  INSERTED.ExportDate AS exportDate
-            VALUES (
-                @invoiceType,
-                @invoiceNumber,
-                @vendKey,
-                @vendorId,
-                @companyId,
-                @invoiceDate,
-                COALESCE(@exportDate, CAST(GETDATE() AS DATE)),
-                @dueDate,
-                @memo,
-                @beanworksInvoiceUrl,
-                @currency,
-                @totalAmount,
-                @rawPayload,
-                @processingStatus
-            );
-    `);
+          UPDATE dbo.QuadientInvoiceStaging
+          SET VendKey = @vendKey,
+              InvoiceDate = @invoiceDate,
+              ExportDate = COALESCE(@exportDate, CAST(GETDATE() AS date)),
+              DueDate = @dueDate,
+              Memo = @memo,
+              BeanworksInvoiceURL = @beanworksInvoiceUrl,
+              Currency = @currency,
+              TotalAmount = @totalAmount,
+              RawPayload = @rawPayload,
+              InvoiceType = @invoiceType,
+              ProcessingStatus = @processingStatus,
+              ProcessingMessage = NULL,
+              ProcessedAt = NULL,
+              SageImportSessionKey = NULL,
+              SageVoucherKey = NULL
+          OUTPUT INSERTED.ExportDate AS exportDate
+          WHERE QuadientInvoiceStagingID = @stagingId
+            AND ProcessingStatus = 'ThreeWayError'
+            AND SageImportSessionKey IS NULL
+            AND SageVoucherKey IS NULL;
+        `);
+      if (updated.recordset.length !== 1) {
+        throw makeInvoiceIntakeError(409, 'INVOICE_STATE_CHANGED',
+          'Original invoice status changed while receiving the correction.');
+      }
+      exportDate = updated.recordset[0].exportDate;
 
-      const stagingId = headerResult.recordset[0].stagingId;
-      const exportDate = headerResult.recordset[0].exportDate;
+      await new sql.Request(transaction)
+        .input('stagingId', sql.Int, stagingId)
+        .query(`
+          DELETE FROM dbo.QuadientInvoiceLineStaging
+          WHERE QuadientInvoiceStagingID = @stagingId;
+        `);
+    } else {
+      const headerResult = await new sql.Request(transaction)
+        .input('invoiceNumber', sql.NVarChar(50), invoiceNumber)
+        .input('vendKey', sql.Int, sageVendorKey)
+        .input('vendorId', sql.NVarChar(50), sageVendorId)
+        .input('companyId', sql.NVarChar(20), companyId)
+        .input('invoiceDate', sql.Date, payload.invoiceDate)
+        .input('exportDate', sql.Date, payload.exportDate || null)
+        .input('dueDate', sql.Date, payload.dueDate)
+        .input('memo', sql.NVarChar(sql.MAX), cleanString(payload.memo))
+        .input('beanworksInvoiceUrl', sql.NVarChar(500), cleanString(payload.beanworksInvoiceUrl))
+        .input('currency', sql.NVarChar(10), cleanString(payload.currency))
+        .input('totalAmount', sql.Decimal(19, 4), payload.totalAmount)
+        .input('rawPayload', sql.NVarChar(sql.MAX), rawPayloadJson)
+        .input('invoiceType', sql.NVarChar(20), invoiceType)
+        .input('processingStatus', sql.NVarChar(30), processingStatus)
+        .query(`
+          INSERT INTO dbo.QuadientInvoiceStaging (
+            InvoiceType, InvoiceNumber, VendKey, VendorID, CompanyID,
+            InvoiceDate, ExportDate, DueDate, Memo, BeanworksInvoiceURL,
+            Currency, TotalAmount, RawPayload, ProcessingStatus
+          )
+          OUTPUT INSERTED.QuadientInvoiceStagingID AS stagingId,
+                 INSERTED.ExportDate AS exportDate
+          VALUES (
+            @invoiceType, @invoiceNumber, @vendKey, @vendorId, @companyId,
+            @invoiceDate, COALESCE(@exportDate, CAST(GETDATE() AS date)),
+            @dueDate, @memo, @beanworksInvoiceUrl, @currency,
+            @totalAmount, @rawPayload, @processingStatus
+          );
+        `);
+      stagingId = headerResult.recordset[0].stagingId;
+      exportDate = headerResult.recordset[0].exportDate;
+    }
 
       for (const line of payload.lines) {
         const lineRequest = new sql.Request(transaction);
@@ -4018,9 +4151,11 @@ app.post('/quadient/invoice', async (req, res) => {
           `);
       }
 
-      await transaction.commit();
+    await transaction.commit();
+    transactionStarted = false;
 
-      writeLog('quadient-invoice.log', 'INVOICE_STAGED', {
+    writeLog('quadient-invoice.log', existing
+      ? 'CORRECTED_INVOICE_ACCEPTED' : 'INVOICE_STAGED', {
         stagingId,
         invoiceNumber: payload.invoiceNumber,
         vendorKey: sageVendorKey,
@@ -4034,8 +4169,9 @@ app.post('/quadient/invoice', async (req, res) => {
         Sage import is an internal AP process and should not make the Quadient
         upload fail.
       */
-      res.status(201).json({
-        status: 'received',
+      res.status(existing ? 202 : 201).json({
+        status: existing ? 'accepted_for_reprocessing' : 'received',
+        ...(existing ? { previousStatus } : {}),
         processingStatus: processingStatus,
         stagingId,
         invoiceNumber: payload.invoiceNumber,
@@ -4084,29 +4220,29 @@ app.post('/quadient/invoice', async (req, res) => {
       // });
 
       return;
-
-    } catch (err) {
-
-      writeLog('quadient-invoice.log', 'INVOICE_RECEIVE_FAILED', {
-        message: err.message,
-        stack: err.stack,
-        invoiceNumber: payload?.invoiceNumber || null,
-        vendorKey: payload?.vendorKey || null,
-        vendorId: payload?.vendorId || null
-      });
-
-      console.error('Quadient invoice receive failed:', err);
-
-      await transaction.rollback();
-      throw err;
+  } catch (err) {
+    if (transactionStarted) {
+      try {
+        await transaction.rollback();
+      } catch (rollbackErr) {
+        writeLog('quadient-invoice.log', 'INVOICE_RECEIVE_ROLLBACK_FAILED', {
+          message: rollbackErr.message
+        });
+      }
     }
 
-  } catch (err) {
-    console.error('Quadient invoice receive failed:', err);
+    writeLog('quadient-invoice.log', 'INVOICE_RECEIVE_FAILED', {
+      errorCode: err.errorCode || 'INVOICE_RECEIVE_FAILED',
+      message: err.message,
+      invoiceNumber: payload?.invoiceNumber || null,
+      companyId: payload?.companyId || null,
+      vendorId: sageVendorId
+    });
 
-    return res.status(500).json({
-      error: 'INVOICE_RECEIVE_FAILED',
-      message: err.message
+    return res.status(err.statusCode || 500).json({
+      error: err.errorCode || 'INVOICE_RECEIVE_FAILED',
+      message: err.message,
+      ...(err.extra || {})
     });
   }
 });
