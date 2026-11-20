@@ -1124,6 +1124,19 @@ for (const invoice of threeWayInvoices) {
       message: err.message
     });
 
+    // Native 3-way errors previously only went to the log. Notify AP once
+    // per processing attempt, without allowing SMTP trouble to abort the batch.
+    await emailAccountingInvoiceImportFailure({
+      stagingId,
+      invoiceNumber,
+      companyId,
+      vendorId,
+      invoiceType: 'PO_MATCHED',
+      resultCode: err.number ?? err.code ?? 'NATIVE_THREE_WAY_FAILED',
+      resultMessage: message,
+      error: err
+    });
+
     threeWayResults.push({
       stagingId,
       invoiceNumber,
@@ -1940,7 +1953,8 @@ async function processThreeWayInvoice({ invoice }) {
         vendorId,
         companyId,
         stagingId,
-        message
+        invoiceType: 'PO_MATCHED',
+        resultMessage: message
       });
 
       const error = new Error(message);
@@ -2041,7 +2055,8 @@ async function processThreeWayInvoice({ invoice }) {
         vendorId,
         companyId,
         stagingId,
-        message
+        invoiceType: 'PO_MATCHED',
+        resultMessage: message
       });
 
       const error = new Error(message);
@@ -2092,7 +2107,8 @@ async function processThreeWayInvoice({ invoice }) {
         vendorId,
         companyId,
         stagingId,
-        message
+        invoiceType: 'PO_MATCHED',
+        resultMessage: message
       });
 
       const error = new Error(message);
@@ -3307,7 +3323,8 @@ async function emailAccountingInvoiceImportFailure({
   attemptCount,
   resultMessage,
   migrationLogRows,
-  error
+  error,
+  invoiceType = 'TWO_WAY'
 }) {
   const to = process.env.AP_IMPORT_FAILURE_EMAIL_TO;
   const cc = process.env.AP_IMPORT_FAILURE_EMAIL_CC || undefined;
@@ -3317,7 +3334,7 @@ async function emailAccountingInvoiceImportFailure({
       stagingId,
       invoiceNumber
     });
-    return;
+    return false;
   }
 
   const migrationLogText =
@@ -3334,26 +3351,28 @@ async function emailAccountingInvoiceImportFailure({
         ).join('\n\n')
       : 'No rows were found in dbo.tdmMigrationLogWrk for this session.';
 
-  const subject = `Sage AP import failed for Quadient invoice ${invoiceNumber || stagingId}`;
+  const isThreeWay = normalizeInvoiceType(invoiceType) === 'PO_MATCHED';
+  const subject = isThreeWay
+    ? `Sage 3-WAY FAILED - ${companyId || '?'} - ${invoiceNumber || stagingId}`
+    : `Sage AP import failed for Quadient invoice ${invoiceNumber || stagingId}`;
 
   const body = [
-    'A Quadient invoice was received and stored successfully, but the Sage Pending AP Voucher import failed.',
+    isThreeWay
+      ? 'A Quadient PO_MATCHED invoice failed native Sage three-way processing.'
+      : 'A Quadient invoice was received and stored successfully, but the Sage Pending AP Voucher import failed.',
     '',
-    `Staging ID: ${stagingId || ''}`,
+    `Invoice Type: ${isThreeWay ? 'PO_MATCHED' : 'TWO_WAY'}`,
+    `Staging ID: ${stagingId ?? ''}`,
     `Invoice Number / TranNo: ${invoiceNumber || ''}`,
     `Company: ${companyId || ''}`,
     `Vendor ID: ${vendorId || ''}`,
-    `SessionKey: ${sessionKey || ''}`,
+    `SessionKey: ${sessionKey ?? ''}`,
     `ResultCode: ${resultCode ?? ''}`,
     `Attempts: ${attemptCount || 1}`,
     `ResultMessage: ${resultMessage || ''}`,
-    '',
-    'Migration Log:',
-    migrationLogText,
-    '',
-    error ? 'Exception:' : '',
-    error ? (error.stack || error.message || String(error)) : ''
-  ].filter(line => line !== '').join('\n');
+    ...(isThreeWay ? [] : ['', 'Migration Log:', migrationLogText]),
+    ...(error ? ['', 'Exception:', error.stack || error.message || String(error)] : [])
+  ].join('\n');
 
   writeLog('quadient-invoice.log', 'AP_IMPORT_FAILURE_EMAIL_BODY', {
     to,
@@ -3375,6 +3394,7 @@ async function emailAccountingInvoiceImportFailure({
       invoiceNumber,
       messageId: mailResult.messageId || null
     });
+    return true;
   } catch (mailErr) {
     writeLog('quadient-invoice.log', 'AP_IMPORT_FAILURE_EMAIL_FAILED', {
       stagingId,
@@ -3382,6 +3402,7 @@ async function emailAccountingInvoiceImportFailure({
       message: mailErr.message,
       stack: mailErr.stack
     });
+    return false;
   }
 }
 
@@ -3634,14 +3655,19 @@ app.post('/quadient/invoice/reprocess/:stagingId', async (req, res) => {
 
 app.post('/quadient/test-error-email', async (req, res) => {
   try {
-    await emailAccountingInvoiceImportFailure({
+    const testType = normalizeInvoiceType(req.body?.invoiceType || 'TWO_WAY');
+    if (!['TWO_WAY', 'PO_MATCHED'].includes(testType)) {
+      return res.status(400).json({ error: 'INVALID_INVOICE_TYPE' });
+    }
+    const delivered = await emailAccountingInvoiceImportFailure({
       stagingId: 999999,
       invoiceNumber: 'TEST-EMAIL',
       companyId: 'ANA',
       vendorId: 'TESTVEND',
-      sessionKey: 12345,
+      invoiceType: testType,
+      sessionKey: testType === 'TWO_WAY' ? 12345 : null,
       resultCode: -1,
-      resultMessage: 'This is a test Sage AP import failure email.',
+      resultMessage: `This is a test ${testType} Sage AP import failure email.`,
       migrationLogRows: [
         {
           EntryNo: 1,
@@ -3654,7 +3680,13 @@ app.post('/quadient/test-error-email', async (req, res) => {
       ]
     });
 
-    res.json({ status: 'sent' });
+    if (!delivered) {
+      return res.status(503).json({
+        error: 'EMAIL_TEST_NOT_SENT',
+        message: 'SMTP send failed or notification recipient not configured; inspect quadient-invoice.log.'
+      });
+    }
+    res.json({ status: 'sent', invoiceType: testType });
   } catch (err) {
     res.status(500).json({
       error: 'EMAIL_TEST_FAILED',
